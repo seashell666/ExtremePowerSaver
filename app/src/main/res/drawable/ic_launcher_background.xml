@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 图标底：满铺喜庆大红，中心偏上带一层暖金光晕 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="0"
+                android:endY="108"
+                android:startX="0"
+                android:startY="0"
+                android:type="linear">
+                <item
+                    android:color="#FFE82C12"
+                    android:offset="0" />
+                <item
+                    android:color="#FFD81E06"
+                    android:offset="0.5" />
+                <item
+                    android:color="#FFB01605"
+                    android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 喜庆暖金光晕 -->
+    <path android:pathData="M54,52m-46,0a46,46 0,1 1,92 0a46,46 0,1 1,-92 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="54"
+                android:centerY="50"
+                android:gradientRadius="48"
+                android:type="radial">
+                <item
+                    android:color="#3AFFD08A"
+                    android:offset="0" />
+                <item
+                    android:color="#14FFC96B"
+                    android:offset="0.6" />
+                <item
+                    android:color="#00FFC96B"
+                    android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

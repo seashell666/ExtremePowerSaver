@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 单独使用的金黄色闪电（放大版），用于 App 内页与旧版图标 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="1.24"
+        android:scaleY="1.24">
+        <path
+            android:fillColor="#4DFFE7A8"
+            android:pathData="M60,18 L32,58 L52,58 L48,90 L78,48 L56,48 Z" />
+    </group>
+
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="1.15"
+        android:scaleY="1.15">
+        <path android:pathData="M60,18 L32,58 L52,58 L48,90 L78,48 L56,48 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:endX="76"
+                    android:endY="90"
+                    android:startX="34"
+                    android:startY="18"
+                    android:type="linear">
+                    <item
+                        android:color="#FFFFE07A"
+                        android:offset="0" />
+                    <item
+                        android:color="#FFFFC61A"
+                        android:offset="0.5" />
+                    <item
+                        android:color="#FFE89600"
+                        android:offset="1" />
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
+</vector>

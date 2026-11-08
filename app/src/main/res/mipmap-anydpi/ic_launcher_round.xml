@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API < 26 的兜底圆形图标 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="oval">
+            <gradient
+                android:angle="270"
+                android:centerColor="@color/festive_red"
+                android:endColor="@color/festive_red_bottom"
+                android:startColor="@color/festive_red_top" />
+        </shape>
+    </item>
+    <item android:drawable="@drawable/ic_bolt_full" />
+</layer-list>

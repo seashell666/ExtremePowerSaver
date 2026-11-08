@@ -1,0 +1,18 @@
+# 仓库内统一使用 LF，避免在 Windows 上克隆出来的 shell 脚本带 CRLF
+# （CRLF 的 .sh 在 Android 的 /system/bin/sh 下会直接语法错误）
+* text=auto eol=lf
+
+# Windows 批处理必须是 CRLF，否则 cmd 解析异常
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件，禁止任何换行符与编码转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.jar binary
+*.apk binary
+*.aab binary
+*.keystore binary
+*.jks binary

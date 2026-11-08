@@ -1,0 +1,29 @@
+# Gradle / 构建产物
+.gradle/
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.hprof
+
+# 本机专属配置：每台机器的 SDK 路径不同，绝不能提交
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 签名材料（如果以后加签名，这个尤其不能传）
+*.jks
+*.keystore
+signing.properties
+
+# 构建出的安装包（发版走 GitHub Releases，不进仓库历史）
+*.apk
+*.aab
+
+# 系统
+.DS_Store
+Thumbs.db

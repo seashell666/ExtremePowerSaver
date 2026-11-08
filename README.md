@@ -1,0 +1,266 @@
+# 超级省电 APK（ExtremePowerSaver）
+
+小米 11 / Android 13 / MIUI 14 上一键进入「超级省电模式」的 Kotlin APK。
+**打开即执行**，无需点击；通过 root 调用 MIUI 原生开关，效果与手动点击完全一致
+（含切换深色省电桌面、关闭后台、限制性能等）。
+
+> 本方案已在真机（M2011K2C / Android 13 / MIUI V140 / V14.0.10.0.TKBCNXM / Magisk）上
+> 反复实测通过。
+
+<p>
+  <img src="docs/home.png" width="230" alt="打开即进入超级省电">
+  <img src="docs/settings.png" width="230" alt="命令设置页">
+</p>
+
+## 外观
+
+- **图标**：喜庆大红底 + 金黄色闪电，走 adaptive icon（自适应图标），
+  在圆角方形 / 圆形 / 水滴等不同启动器蒙版下都是红底闪电。
+- **界面**：主界面、设置页统一铺满大红底色（状态栏、导航栏同色，视觉无缝），
+  内容放在白色卡片里；加载中、成功、失败、跳过等任何状态都是同一套红底，
+  不会闪出黑屏或白屏。
+
+## 功能
+
+- **打开即进入**：点图标直接切到 MIUI 原生超级省电模式，无确认弹窗、无需二次点击。
+- **插电自动退出**：进入省电后接上电源，1~8 秒内自动退出。
+  由 root 守护进程实现（不依赖 App 存活），因此超级省电把 App 冻结后依然有效。
+- **命令可改**：默认内置「进入 / 退出」两条命令，也可以换成任意 root 命令。
+
+## 环境要求
+
+| 项 | 要求 |
+|---|---|
+| 机型 | 小米 / 红米 / POCO —— 依赖 `com.miui.securitycenter` 的 `PowerSaverProvider` |
+| 系统 | MIUI（实测 MIUI 14 / Android 13）；必须 **root**（Magisk / KernelSU / APatch） |
+| 构建 | JDK 17 + Android SDK 34（`compileSdk 34`） |
+
+非小米系机型没有 `com.miui.powercenter.powersaver` 这个 provider，**装上也无法工作**。
+
+## 免责声明
+
+本工具通过 root 调用 MIUI 系统服务的非公开接口，**使用风险自负**。
+作者仅在自己的设备上验证；不同 MIUI 版本、机型、地区版可能行为不同，
+甚至可能因系统差异导致功能无效。请自行评估后再安装。
+
+---
+
+## 一、重要：网上流传的 `EXTREME_POWER_SAVE_MODE_OPEN` 是无效的
+
+实测结论（务必先看，能省你很多时间）：
+
+| 做法 | 结果 |
+|---|---|
+| `settings put system EXTREME_POWER_SAVE_MODE_OPEN 1` | 值能写入，但**桌面不切换、系统无任何动作**。这个键没人监听，纯状态残留 |
+| `settings put system POWER_SAVE_MODE_OPEN 1` | 只触发 `PowerSaveModeManager.onPowerSaveChanged`，**仍不切换桌面** |
+| `am start -a com.miui.powercenter.SUPERPOWER_SAVE` | 只打开设置页，不执行 |
+| `am start .../SuperPowerProgressActivity` | 该 Activity 是 `exported=false`，单独拉起只是一闪而过 |
+| `cmd statusbar click-tile ...SuperPowerTileService` | 该服务 `enabled=false`，且 MIUI 阉割了 `cmd statusbar` 的 click-tile |
+
+**真正能切换的是 `com.miui.securitycenter` 里的 `PowerSaverProvider`。**
+
+## 二、真正的调用方式（本 APK 用的就是它）
+
+反编译 `MIUISecurityCenter.apk` 得到 `PowerSaverProvider.call()` 的分发逻辑：
+
+```
+if ("changeSuperPowerMode".equals(method)) a(bundle, false);
+    // a(bundle, fromuser) 会读：
+    //   POWER_SUPERSAVE_MODE_OPEN   (boolean)  —— 开/关
+    //   POWER_SUPERSAVE_MODE_FROMUSER (boolean) —— 是否视为用户操作
+```
+
+对应到命令（**root 执行**）：
+
+```bash
+# 进入超级省电
+/system/bin/content call --uri content://com.miui.powercenter.powersaver \
+  --method changeSuperPowerMode \
+  --extra POWER_SUPERSAVE_MODE_OPEN:b:true \
+  --extra POWER_SUPERSAVE_MODE_FROMUSER:b:true
+
+# 退出超级省电
+/system/bin/content call --uri content://com.miui.powercenter.powersaver \
+  --method changeSuperPowerMode \
+  --extra POWER_SUPERSAVE_MODE_OPEN:b:false \
+  --extra POWER_SUPERSAVE_MODE_FROMUSER:b:true
+```
+
+验证成功的标志（logcat）：
+
+```
+W SuperPowerSaveManager: switchSuperPower enter super power :
+    bSuperPower(true)-fromuser(true)-powerpercent(69)-userenterstate(true)-userleavestate(false)
+```
+
+随后前台会变成 `com.miui.securityadd/com.miui.superpower.SuperPowerLauncherActivity`
+（深色极简省电桌面）。
+
+## 三、安装与使用
+
+```bash
+# MIUI 默认拦截 adb install，用 root 装（或手动传手机点安装）
+adb push 超级省电.apk /data/local/tmp/eps.apk
+adb shell su -c "pm install -r -t /data/local/tmp/eps.apk"
+```
+
+1. 打开 App → **首次会弹 Magisk 超级用户请求，必须点「允许」**（建议选"永久"）。
+   若误点拒绝，去 Magisk → 超级用户里把「超级省电」改成允许。
+2. 之后每次点开图标，就会自动进入超级省电模式。
+3. 长按图标 → 「命令设置」：可改命令、切换成"退出超级省电"预设、立即测试。
+
+## 四、插上充电自动退出超级省电
+
+### 4.1 为什么不能像普通 App 那样监听
+
+| 常规做法 | 为什么不行 |
+|---|---|
+| 注册 `ACTION_POWER_CONNECTED` 广播 | 超级省电会把第三方 App 冻结/杀掉，广播根本收不到 |
+| 前台服务 + 监听 | 同样被冻结；还多一个常驻通知和耗电 |
+| `JobScheduler` 充电约束 | 最小粒度分钟级，做不到"一插就退" |
+
+所以做成 **root 守护进程**，和 App 完全解耦。
+
+### 4.2 实现方式
+
+App 把一个 shell 脚本安装到 Magisk 的 `service.d`：
+
+```
+/data/adb/service.d/eps_charge_watch.sh
+```
+
+关键设计（都是实测踩出来的）：
+
+1. **开机自动启动**：Magisk 在 `late_start service` 阶段以 root 执行该目录下的脚本，不依赖 App 是否运行。
+2. **自我脱壳**：脚本一启动就用 `setsid` 把真正的守护循环转入新 session，父进程 30ms 内返回。
+   不这么做的话脚本会长时间阻塞 Magisk 的 boot stage。
+3. **不被冻结**：脱壳后进程 `PPid=1`，位于 root cgroup（`0::/`），
+   不在 App 的 `uid_xxxxx` cgroup 里，系统的 app freezer 管不到它。
+4. **单实例 + 身份校验**：pidfile 里的 pid 必须能在 `/proc/<pid>/cmdline` 里匹配到
+   `eps_charge_watch`，否则视为过期（重启后 pid 会被复用，不校验会误判甚至误杀别的进程）。
+5. **检测口径**：读 `/sys/class/power_supply/{usb,ac,wireless,dc}/online`，
+   与内核插电状态同源；用 shell 内建 `read` 读取，**不 fork 任何进程**。
+
+触发逻辑：
+
+- **插电瞬间（边沿）**：不查任何设置键，直接调用一次退出命令。
+  这是跨机型/跨 MIUI 版本最可靠的路径——不依赖 `POWER_SAVE_MODE_OPEN` 这类实现细节
+  （不同版本可能是 `EXTREME_POWER_SAVE_MODE_OPEN` 等）。实测不在省电状态时调用是无害空操作。
+- **充电中每 10 秒兜底**：只在读键确认为 `1` 时才再调用，避免无谓 fork。
+- 退出后会 `sleep 12` 等 MIUI 切换动画结束，避免紧接着的复查误判。
+
+### 4.3 开销实测（小米 11 / Android 13）
+
+| 指标 | 实测值 | 说明 |
+|---|---|---|
+| CPU | 60 秒 90ms ≈ **0.15% 单核** | 这是"充电中"最坏情况（每 10 秒查一次状态） |
+| 内存 | **2.1 MB** | 单线程 shell |
+| 待机唤醒 | **0** | 不持 wakelock；设备睡眠时循环随 CPU 挂起，不产生唤醒 |
+
+不充电时（也就是超级省电的常态）只读 sysfs，开销比上表还低一个量级。
+插电时内核本身就会唤醒 AP，循环随之恢复，所以"睡眠中插电"不会漏检。
+
+### 4.4 副作用（需要知道）
+
+- 开启后，**插着电打开 App 不会进入超级省电**，会提示"正在充电，已跳过进入"。
+  否则刚进入就会被守护进程在 10 秒内踢出来，体验更怪。拔掉电源后照常进入。
+- 会在系统里多一个文件 `/data/adb/service.d/eps_charge_watch.sh`；
+  在设置页取消勾选会**删除脚本并杀掉进程**，不留残留。
+- 若想"插着电也用超级省电"，把这个开关关掉即可。
+
+### 4.5 排障
+
+```bash
+adb shell su -c "cat /data/local/tmp/eps_charge_watch.log"   # 运行日志
+adb shell su -c "cat /data/local/tmp/eps_charge_watch.pid"   # 当前 pid
+adb shell su -c "grep EPS_SCRIPT_VERSION /data/adb/service.d/eps_charge_watch.sh"  # 脚本版本
+```
+
+设置页里也会直接显示「✅ 守护进程运行中（pid xxxx，脚本 vN）」和最近几行日志。
+
+### 4.6 默认启用与脚本热升级（v1.1 起）
+
+早期版本有个设计缺陷：`auto_exit_on_charge` 默认 `false`，而 `ensureInstalled()`
+在开关关闭时直接 return。结果是**全新安装的设备上守护脚本压根不会安装**，
+表现为「能进超级省电，但插电不退出」——看起来像功能失效，其实是没启用。
+
+现在：
+
+1. **默认启用**：装好 APK 打开一次，就会自动请求 root、把脚本落到
+   `/data/adb/service.d/` 并立即拉起，无需进设置页手动勾选。
+   用户在设置页显式关掉后，不再自动安装（尊重选择）。
+2. **脚本版本自愈**：脚本内嵌 `EPS_SCRIPT_VERSION`，App 侧 `SCRIPT_VERSION` 与其比对，
+   不一致就自动覆盖重装并重启进程。否则已安装的旧脚本永远不会升级，
+   会出现「APK 更新了但行为还是老样子」。
+
+排查「插电不退出」时，先看设置页状态行里的脚本版本号：显示 `v3` 以上才是当前逻辑。
+
+### 4.7 日志里的 "daemon terminating" 是什么
+
+v3 起终止信号用 `trap ... TERM INT HUP`，只记录**真实被杀**。
+早期版本用的是 `trap ... EXIT`，而 `$(date ...)`、`$(settings get ...)` 这类命令替换
+会 fork 子 shell 并继承 EXIT trap，子 shell 退出时也打一条 `daemon exiting`，
+看起来像守护进程死了，实际主进程健康。如果你在旧日志里看到这种记录，可以忽略。
+
+验证进程是否真的活着：
+
+```bash
+adb shell su -c 'P=$(cat /data/local/tmp/eps_charge_watch.pid); [ -d /proc/$P ] && echo ALIVE || echo DEAD'
+```
+
+注意不要用 `ps -A | grep eps_charge` 判断——Android 的 `ps` 只显示 15 字符的 `Name`（`sh`），
+查不到脚本名。
+
+## 五、编译
+
+需要 JDK 17 + Android SDK（platform 34）。仓库自带 Gradle Wrapper（8.7）。
+
+```bash
+# local.properties 里写你自己的 SDK 路径（该文件已被 .gitignore 排除）
+echo "sdk.dir=/path/to/Android/sdk" > local.properties
+
+# Windows 下设置 JAVA_HOME 后
+./gradlew assembleDebug
+# 产物：app/build/outputs/apk/debug/app-debug.apk
+```
+
+> 从 GitHub 克隆后如果提示 `./gradlew: Permission denied`，先执行
+> `chmod +x gradlew` —— 通过网页或 API 上传的文件不携带可执行位。
+
+本机实测可用环境：JDK 17 + Android SDK platform-34（build-tools 34.0.0），
+Gradle 由仓库自带的 Wrapper 8.7 提供，不需要单独安装。
+
+## 六、代码结构
+
+| 文件 | 作用 |
+|---|---|
+| `MainActivity.kt` | 打开即执行，检查 root → 执行命令 → 结果提示 → 退出；含"充电中不进入"守卫 |
+| `RootShell.kt` | su 探测与 `su -c` 执行封装（多路径探测 + 超时 + 被中断容错） |
+| `ChargeWatch.kt` | 充电守护进程的安装/启停/状态查询（写 service.d、拉起、校验 pid 身份） |
+| `SettingsActivity.kt` | 命令编辑、预设（进入/退出）、立即测试、充电自动退出开关与状态 |
+| `Prefs.kt` | 命令与开关的本地存储 |
+| `assets/eps_charge_watch.sh` | 守护脚本本体（开机自启 + 脱壳 + sysfs 轮询 + 调 provider 退出） |
+
+## 七、已知问题与注意事项
+
+- **首次运行必须在 Magisk 弹窗点「允许」**，否则 `su -c id` 返回 `Permission denied`，
+  App 会提示"未获得 root 权限"。可通过 logcat 过滤 `EPS` 标签排查。
+- 进入超级省电后，本 App 自身会被系统限制（这正是省电的目的），属正常现象。
+- 若某次打开没反应，先看：
+  ```bash
+  adb logcat -s EPS:*
+  adb shell settings get system POWER_SAVE_MODE_OPEN
+  ```
+- **不要用 `BatteryManager.isCharging()` 判断"是否插电"**：实测这台机器插着 USB 时
+  `dumpsys battery` 显示 `USB powered: true / status: 2`，但 `isCharging()` 返回 `false`。
+  要判断"插没插电源"，用 `ACTION_BATTERY_CHANGED` 的 `EXTRA_PLUGGED != 0`，
+  它和内核 sysfs 的 `online` 同源，也和守护脚本的口径一致。
+- 本 App 只下发切换命令，不联网、不上传数据；充电守护进程也不产生网络请求。
+- 换 MIUI / HyperOS 版本后，若 `content call` 报 `IllegalArgumentException` 或无效，
+  说明 provider 的 method 或 key 变了，需要重新反编译确认。
+
+## 八、参考
+
+最初思路来自社区里的一个 Vector / Xposed 模块（通过注入 `system_server` 监听电量来写设置键）。
+该项目改为**普通 APK + root + 直接调用 PowerSaverProvider**，
+打开即触发，无需 Xposed、无需刷框架。

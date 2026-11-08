@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 全 App 背景：自上而下的喜庆大红渐变，状态栏/导航栏取两端同色，视觉无缝 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="270"
+        android:centerColor="@color/festive_red"
+        android:endColor="@color/festive_red_bottom"
+        android:startColor="@color/festive_red_top"
+        android:type="linear" />
+</shape>

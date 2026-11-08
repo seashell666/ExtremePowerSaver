@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 喜庆大红 -->
+    <color name="festive_red">#FFD81E06</color>
+    <color name="festive_red_top">#FFE42A10</color>
+    <color name="festive_red_bottom">#FFB01605</color>
+    <color name="festive_gold">#FFFFC96B</color>
+
+    <!-- 闪电金 -->
+    <color name="flash_gold_light">#FFFFE07A</color>
+    <color name="flash_gold">#FFFFC61A</color>
+    <color name="flash_gold_deep">#FFE89600</color>
+
+    <!-- 卡片与文字 -->
+    <color name="card_bg">#FFFFFBF8</color>
+    <color name="card_field">#FFFFF5F0</color>
+    <color name="text_dark">#FF2A1611</color>
+    <color name="text_body">#FF6B5049</color>
+    <color name="text_hint">#FFA8928C</color>
+    <color name="on_red_primary">#FFFFFFFF</color>
+    <color name="on_red_secondary">#E6FFE6DF</color>
+    <color name="divider_soft">#1FD81E06</color>
+</resources>

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 图标前景：金黄色闪电（带暖金光晕），置于 adaptive icon 安全区内 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 外层暖金柔光 -->
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.70"
+        android:scaleY="0.70"
+        android:translateX="-1">
+        <path
+            android:fillColor="#4DFFE7A8"
+            android:pathData="M60,18 L32,58 L52,58 L48,90 L78,48 L56,48 Z" />
+    </group>
+
+    <!-- 金黄色闪电主体 -->
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.62"
+        android:scaleY="0.62"
+        android:translateX="-1">
+        <path android:pathData="M60,18 L32,58 L52,58 L48,90 L78,48 L56,48 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:endX="76"
+                    android:endY="90"
+                    android:startX="34"
+                    android:startY="18"
+                    android:type="linear">
+                    <item
+                        android:color="#FFFFE07A"
+                        android:offset="0" />
+                    <item
+                        android:color="#FFFFC61A"
+                        android:offset="0.5" />
+                    <item
+                        android:color="#FFE89600"
+                        android:offset="1" />
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
+</vector>
