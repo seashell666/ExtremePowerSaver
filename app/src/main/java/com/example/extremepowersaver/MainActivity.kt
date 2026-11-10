@@ -62,12 +62,30 @@ class MainActivity : AppCompatActivity() {
 
             val cmd = Prefs.command(this)
 
-            // 3. 一致性守卫：已开启「充电自动退出」且正在充电时，进入超级省电没有意义
-            //    （否则会在 10 秒内被守护进程踢回普通模式）
+            // 3. 一致性守卫：已开启充电自动化、正在充电、且电量已超过退出门槛时，
+            //    进入超级省电没有意义——进去也会被守护进程退出来。
+            //    电量还没到门槛则照常进入：v1.5 起守护进程会留着它，
+            //    等电量涨过门槛再自动退出并息屏。
+            var chargeNote = ""
             if (Prefs.autoExitOnCharge(this) && cmd.contains("POWER_SUPERSAVE_MODE_OPEN:b:true") && isPluggedIn()) {
-                Log.i("EPS", "charging detected, skip entering super power save")
-                finishWith(true, "正在充电，已跳过进入", "已开启「充电自动退出超级省电」，插着电源时不进入。拔掉电源后再打开即可。")
-                return@execute
+                val pct = batteryPercent()
+                if (pct == null) {
+                    Log.i("EPS", "charging detected, battery level unknown, skip entering")
+                    finishWith(true, "正在充电，已跳过进入", "已开启「充电自动退出超级省电」，插着电源时不进入。拔掉电源后再打开即可。")
+                    return@execute
+                }
+                if (pct > Prefs.EXIT_BATTERY_PCT) {
+                    Log.i("EPS", "charging + ${pct}% > ${Prefs.EXIT_BATTERY_PCT}%, skip entering")
+                    finishWith(
+                        true,
+                        "电量 ${pct}%，无需进入",
+                        "充电中电量已超过 ${Prefs.EXIT_BATTERY_PCT}%（当前 ${pct}%），进入超级省电意义不大。" +
+                            "守护进程在这种状态下会自动退出超级省电并息屏。"
+                    )
+                    return@execute
+                }
+                Log.i("EPS", "charging but ${pct}% <= ${Prefs.EXIT_BATTERY_PCT}%, allow entering")
+                chargeNote = "充电中（电量 ${pct}%），涨到 ${Prefs.EXIT_BATTERY_PCT + 1}% 后会自动退出并息屏"
             }
 
             val result = RootShell.run(cmd)
@@ -83,7 +101,7 @@ class MainActivity : AppCompatActivity() {
 
             val ok = result.ok && !looksFailed
             val detail = if (ok) {
-                "命令已下发，系统正在切换"
+                if (chargeNote.isEmpty()) "命令已下发，系统正在切换" else "命令已下发，系统正在切换\n$chargeNote"
             } else {
                 "exit=${result.exitCode}  ${output.take(180)}"
             }
@@ -100,6 +118,22 @@ class MainActivity : AppCompatActivity() {
      * EXTRA_PLUGGED 与内核 sysfs 的 online 同源，才是「是否插电」的真值，
      * 也和守护脚本的判断口径一致。
      */
+    /**
+     * 当前电量百分比（0~100），读不到返回 null。
+     *
+     * 和守护脚本读的是同一个真值来源（内核 capacity），只是 App 侧走
+     * sticky 广播，不需要 root、也不会多 fork 进程。
+     */
+    private fun batteryPercent(): Int? = try {
+        val sticky = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = sticky?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = sticky?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        if (level < 0 || scale <= 0) null else level * 100 / scale
+    } catch (t: Throwable) {
+        Log.w("EPS", "batteryPercent failed", t)
+        null
+    }
+
     private fun isPluggedIn(): Boolean = try {
         val sticky = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val plugged = sticky?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0

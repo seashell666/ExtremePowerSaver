@@ -178,20 +178,40 @@
             android:orientation="vertical"
             android:padding="18dp">
 
-            <TextView
-                android:layout_width="wrap_content"
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="充电自动退出"
-                android:textColor="@color/text_dark"
-                android:textSize="17sp"
-                android:textStyle="bold" />
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="充电自动退出"
+                    android:textColor="@color/text_dark"
+                    android:textSize="17sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_chip"
+                    android:paddingStart="7dp"
+                    android:paddingTop="2dp"
+                    android:paddingEnd="7dp"
+                    android:paddingBottom="2dp"
+                    android:text="满 77%"
+                    android:textColor="@color/festive_red"
+                    android:textSize="10sp" />
+            </LinearLayout>
 
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 android:lineSpacingExtra="3dp"
-                android:text="开启后，处于超级省电模式时一旦插上电源（有线/无线），1 秒内自动退出。由 Magisk 的 service.d 守护进程实现，开机自启，不依赖本 App 是否运行。"
+                android:text="插上电源（有线/无线）后 1 秒内自动退出超级省电。如果充电时仍处于超级省电，电量超过 77% 会自动退出并立刻息屏。由 Magisk 的 service.d 守护进程实现，开机自启，不依赖本 App 是否运行。"
                 android:textColor="@color/text_body"
                 android:textSize="12sp" />
 
@@ -201,7 +221,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
                 android:buttonTint="@color/festive_red"
-                android:text="插上充电时自动退出超级省电"
+                android:text="充电时自动退出超级省电"
                 android:textColor="@color/text_dark"
                 android:textSize="13sp"
                 app:buttonTint="@color/festive_red" />

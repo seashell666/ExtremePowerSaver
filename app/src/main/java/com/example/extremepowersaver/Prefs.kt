@@ -15,6 +15,14 @@ object Prefs {
     /** 闲置多久判定为「没人在用」，单位秒。447 = 7 分 27 秒。改这里就能调整时长。 */
     const val IDLE_TIMEOUT_SEC = 447
 
+    /**
+     * 充电中「电量大到没必要再省电」的门槛，单位百分比。
+     *
+     * 充电状态 + 仍处于超级省电 + 电量 **大于** 这个值 → 自动退出超级省电并立刻息屏。
+     * 写 77 就是 78% 起才会动手（严格大于）。改这里就能调整门槛。
+     */
+    const val EXIT_BATTERY_PCT = 77
+
     /** 默认命令：进入超级省电（已在小米11 / MIUI14 / Android13 实测可用） */
     const val DEFAULT_ENTER =
         "/system/bin/content call --uri content://com.miui.powercenter.powersaver " +

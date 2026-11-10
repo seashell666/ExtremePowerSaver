@@ -3,6 +3,7 @@
 #  ExtremePowerSaver · 守护进程
 #
 #  功能一 · 插电自动退出超级省电
+#           + 充电中处于超级省电且电量 > 77% → 退出超级省电并立刻息屏
 #  功能二 · 闲置息屏：连续 N 秒没有任何触屏 → 回桌面 + 息屏
 #           （超级省电模式下不生效，由本脚本主动跳过）
 #
@@ -28,7 +29,7 @@
 export PATH=/system/bin:/system/xbin:/sbin:/data/adb/magisk:$PATH
 
 # 脚本版本：App 侧会比对，不一致就自动重装覆盖（否则老脚本永远不升级）
-EPS_SCRIPT_VERSION=12
+EPS_SCRIPT_VERSION=14
 
 PIDFILE=/data/local/tmp/eps_charge_watch.pid
 IDLEPIDFILE=/data/local/tmp/eps_charge_watch.idle.pid
@@ -41,6 +42,10 @@ ENABLE_CHARGE=1
 ENABLE_IDLE=1
 IDLE_TIMEOUT=447
 
+# 充电中「电量大到没必要再省电」的门槛，单位百分比。
+# 大于这个值（严格大于）才自动退出超级省电，77 → 78% 起才会动手。
+EXIT_BATTERY_PCT=77
+
 if [ -r "$CFG" ]; then
     v=""
     v=$(sed -n 's/^charge=//p' "$CFG" 2>/dev/null | head -n1)
@@ -51,6 +56,11 @@ if [ -r "$CFG" ]; then
     # 下限 5 秒：防止配置被误写成 0/1 导致瞬间反复息屏
     if [ -n "$v" ] && [ "$v" -ge 5 ] 2>/dev/null; then
         IDLE_TIMEOUT=$v
+    fi
+    v=$(sed -n 's/^exit_battery_pct=//p' "$CFG" 2>/dev/null | head -n1)
+    # 卡在 1~99：写成 0 会「只要充电就退」，写成 100 等于功能失效
+    if [ -n "$v" ] && [ "$v" -ge 1 ] 2>/dev/null && [ "$v" -le 99 ] 2>/dev/null; then
+        EXIT_BATTERY_PCT=$v
     fi
 fi
 
@@ -176,17 +186,47 @@ in_super_power() {
     return 1
 }
 
-# 只在确实处于超级省电时才调用，避免无意义的状态错误日志。
-# 插电瞬间还会无条件兜底调用一次 leave_super_power()，
-# 保证键名对不上时功能依然生效。
-# 实测：不在超级省电时调用退出命令是无害空操作（仅日志 state error）。
-try_leave() {
-    if in_super_power; then
-        log "charging + super power active -> leaving"
-        leave_super_power
-        return 0
-    fi
+# 当前电量（0~100）。结果写进 BATT_PCT；返回 1 = 一个节点都读不到。
+#
+# 用 shell 内建 read 直读 sysfs，不 fork 任何进程，也不去碰 dumpsys
+# （dumpsys battery 要拉起一个 app_process，约 60ms，30 秒一次也没必要）。
+battery_pct() {
+    BATT_PCT=""
+    for f in \
+        /sys/class/power_supply/battery/capacity \
+        /sys/class/power_supply/bms/capacity \
+        /sys/class/power_supply/maxfg/capacity \
+        /sys/class/power_supply/mtk-battery/capacity
+    do
+        [ -r "$f" ] || continue
+        bv=""
+        read -r bv < "$f" 2>/dev/null
+        # 只接受纯数字：部分机型这里会出现 "N/A" 或空行
+        case "$bv" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if [ "$bv" -ge 0 ] && [ "$bv" -le 100 ]; then
+            BATT_PCT=$bv
+            return 0
+        fi
+    done
     return 1
+}
+
+# 充电中、仍处于超级省电、且电量已经超过门槛 → 退出超级省电 + 立刻息屏。
+#
+# 这是「插电即退出」之外的补充规则：插电那一刻已经退过一次，但如果之后
+# 又进了超级省电（从系统设置手动进、或者插着电时用 App 进），
+# 只要电量涨过 77%，就没必要继续省电了——直接退出，并把还亮着的屏幕关掉。
+leave_when_battery_high() {
+    log "charging + super power + battery ${BATT_PCT}% > ${EXIT_BATTERY_PCT}% -> leave + screen off"
+    leave_super_power
+    # 等 MIUI 把超级省电的桌面切回普通桌面：这期间发 SLEEP 会被转场吞掉，
+    # 表现成「发了息屏键但屏幕还亮着」。
+    sleep 1.5
+    screen_off_now
+    # 给系统一点时间落地，避免紧接着的复查读到退出前的旧状态
+    sleep 8
 }
 
 # ---- 功能二：闲置息屏 ----
@@ -215,6 +255,33 @@ find_touch_dev() {
 # 只认 Awake：Dozing 是 AOD/息屏显示，屏幕已经黑了，不需要再动。
 screen_is_on() {
     /system/bin/dumpsys power 2>/dev/null | grep -q 'mWakefulness=Awake'
+}
+
+# 只息屏，不动桌面。给「充电中电量够了就退出超级省电」用：
+# 那种场景下不需要回桌面（本来就在普通模式/超级省电的桌面上），
+# 只需要把屏幕关掉。
+# 返回 0 = 屏幕已经黑掉（本来就黑也算）。
+screen_off_now() {
+    if ! screen_is_on; then
+        log "screen already off"
+        return 0
+    fi
+    /system/bin/input keyevent 223         # KEYCODE_SLEEP
+    c=0
+    while [ "$c" -lt 8 ]; do
+        screen_is_on || { log "screen off done"; return 0; }
+        c=$((c + 1))
+        sleep 0.06
+    done
+    # SLEEP 键偶尔被系统吞掉，补发一次再判
+    /system/bin/input keyevent 223
+    sleep 0.12
+    if screen_is_on; then
+        log "screen off failed, give up this round"
+        return 1
+    fi
+    log "screen off done"
+    return 0
 }
 
 # 桌面包名：从系统里问出来，不写死（写死遇到换桌面就整段失效）
@@ -257,6 +324,14 @@ go_home_and_sleep() {
         log "idle ${IDLE_TIMEOUT}s but screen already off -> skip"
         return 1
     fi
+
+    # 桌面包名在 idle 循环启动时只解析一次，但那次可能是在超级省电模式下解析的：
+    # 那时 HOME 会被解析成 com.miui.securityadd 的 SuperPowerLauncherActivity。
+    # 退出超级省电后这个值就是错的，下面「等前台变成桌面」永远等不到，
+    # 只能靠超时兜底，白白多花 0.6 秒。所以动作发生时重新解析一次（约 60ms，一次性开销）。
+    HOME_PKG=$(home_pkg)
+    [ -z "$HOME_PKG" ] && HOME_PKG=com.miui.home
+
     log "idle ${IDLE_TIMEOUT}s no touch -> home + sleep"
 
     # ① 回桌面
@@ -383,6 +458,10 @@ idle_watch() {
 charge_loop() {
     prev=""
     tick=0
+    # 连续多少次复查确认「还老老实实待在超级省电里」。
+    # 用来避免「刚手动进了超级省电就被这条规则踢出来 + 立刻黑屏」。
+    sp_seen=0
+
     while true; do
         if is_charging; then
             online=1
@@ -395,29 +474,46 @@ charge_loop() {
                 # 插电瞬间：不查任何设置键，直接尝试退出一次。
                 # 这是跨机型/跨 MIUI 版本最可靠的路径——不依赖 POWER_SAVE_MODE_OPEN
                 # 这类实现细节；不在省电状态时调用是无害空操作。
+                # 注意这里不看电量：插电即退是原来的行为，保持不变。
                 log "power connected -> try leave (unconditional)"
                 leave_super_power
                 prev=1
                 tick=0
+                sp_seen=0
                 # 等 MIUI 切换动画结束，避免紧接着的复查误判
                 sleep 12
                 trim_log
                 continue
             elif [ "$tick" -ge 15 ]; then
-                # 充电中每 30 秒兜底复查（tick 每 2 秒 +1）。
-                # 间隔从 10 秒放宽到 30 秒，是因为 in_super_power 在设置键
-                # 不命中时还要查一次 Activity 栈（约 50ms），10 秒一次没必要。
+                # 充电中每 30 秒复查（tick 每 2 秒 +1）。
+                # 先查是否在超级省电：设置键便宜，Activity 栈约 50ms，
+                # 30 秒一次没必要更密。
                 tick=0
-                if try_leave; then
-                    sleep 12
-                    trim_log
-                    continue
+                if in_super_power; then
+                    sp_seen=$((sp_seen + 1))
+                    if battery_pct && [ "$BATT_PCT" -gt "$EXIT_BATTERY_PCT" ]; then
+                        # 至少连续两次复查都还在超级省电（≈60 秒）才动手。
+                        # 少了这一步，插着电点开 App 刚进入超级省电，
+                        # 下一秒就被踢出去并黑屏，像是坏了。
+                        if [ "$sp_seen" -ge 2 ]; then
+                            leave_when_battery_high
+                            sp_seen=0
+                            trim_log
+                            continue
+                        fi
+                    elif [ "$sp_seen" = "1" ] && [ -n "$BATT_PCT" ]; then
+                        # 只在首次确认时记一行，避免低电量充一整晚刷满日志
+                        log "charging in super power, battery ${BATT_PCT}% <= ${EXIT_BATTERY_PCT}% -> keep staying"
+                    fi
+                else
+                    sp_seen=0
                 fi
             fi
             tick=$((tick + 1))
         else
             tick=0
             prev=0
+            sp_seen=0
         fi
 
         sleep 2
@@ -431,7 +527,7 @@ if [ "$ENABLE_CHARGE" != "1" ] && [ "$ENABLE_IDLE" != "1" ]; then
     exit 0
 fi
 
-log "features: charge=$ENABLE_CHARGE idle=$ENABLE_IDLE timeout=${IDLE_TIMEOUT}s"
+log "features: charge=$ENABLE_CHARGE idle=$ENABLE_IDLE timeout=${IDLE_TIMEOUT}s exit_pct=${EXIT_BATTERY_PCT}%"
 
 if [ "$ENABLE_IDLE" = "1" ]; then
     idle_watch &
