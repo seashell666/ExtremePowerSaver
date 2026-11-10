@@ -267,6 +267,23 @@ screen off done
 charging in super power, battery 65% <= 77% -> keep staying
 ```
 
+**想自己验证这条规则**（不用真的等到 77%）：把 cfg 里的门槛临时改小再重启守护进程。
+
+```bash
+adb shell su -c 'pkill -9 -f eps_charge_watch; rm -f /data/local/tmp/eps_charge_watch.pid /data/local/tmp/eps_charge_watch.idle.pid'
+adb shell su -c 'printf "charge=1\nidle=1\nidle_timeout=447\nexit_battery_pct=60\n" > /data/local/tmp/eps_charge_watch.cfg'
+adb shell su -c 'sh /data/adb/service.d/eps_charge_watch.sh'
+# 然后插着电手动进一次超级省电，等 60~90 秒看日志：
+adb shell su -c 'tail -f /data/local/tmp/eps_charge_watch.log'
+```
+
+看到 `battery 65% > 60% -> leave + screen off` 和 `screen off done` 就是生效了。
+注意这只是临时生效：**App 下次启动会比对 cfg 与代码里的常量，不一致就覆盖回去**，
+要长期改请改 `Prefs.EXIT_BATTERY_PCT` 重新编译。
+
+如果要验证「不到门槛就不退」，就把门槛调回 77 以上（例如 99），
+同样等 60~90 秒，日志里应当只有 `keep staying`，超级省电状态和屏幕都保持原样。
+
 ## 五、闲置息屏：7 分 27 秒没碰屏幕就回默认主页并息屏
 
 ### 5.1 需求边界
