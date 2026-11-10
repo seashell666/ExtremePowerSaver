@@ -28,7 +28,7 @@
 export PATH=/system/bin:/system/xbin:/sbin:/data/adb/magisk:$PATH
 
 # 脚本版本：App 侧会比对，不一致就自动重装覆盖（否则老脚本永远不升级）
-EPS_SCRIPT_VERSION=9
+EPS_SCRIPT_VERSION=10
 
 PIDFILE=/data/local/tmp/eps_charge_watch.pid
 LOG=/data/local/tmp/eps_charge_watch.log
@@ -193,18 +193,93 @@ screen_is_on() {
     /system/bin/dumpsys power 2>/dev/null | grep -q 'mWakefulness=Awake'
 }
 
-# 空闲到点后的动作：回桌面 + 息屏
+# 桌面包名：从系统里问出来，不写死（写死遇到换桌面就整段失效）
+home_pkg() {
+    p=$(/system/bin/cmd package resolve-activity --brief \
+        -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null | tail -n1)
+    echo "${p%%/*}"
+}
+
+# 非阻塞看一眼触屏上有没有新事件（我们自己发的按键不会产生触屏事件，
+# 所以读到事件 = 用户在碰屏幕）。返回 0 表示「用户正在操作」。
+#
+# 为什么要这个：整套动作要跑 0.6~1.6 秒，这期间 dd 没在读触屏，
+# 用户这时点亮屏幕、点开某个 App，事件全堆在内核 buffer 里没人处理，
+# 动作照样一路执行到底 —— 表现就是「刚点开就啪一下黑屏」。
+# 每一步之间插一次检查，一旦有人碰屏幕就整段放弃。
+touch_seen() {
+    timeout 0.01 dd if="$IDLE_DEV" bs=24 count=1 of=/dev/null 2>/dev/null
+    [ $? -eq 0 ]
+}
+
+# 空闲到点后的动作：回桌面 → 回到默认主页面 → 息屏。
+#
+# 三个关键点（都是踩出来的）：
+# 1) 不能一次把 HOME 和 SLEEP 一起发。键是发了，但桌面转场还没画完屏幕就黑了，
+#    亮屏时看到的就是「卡一下」，而且落点还停在打开 App 的那一页。
+# 2) MIUI 桌面第一次 HOME 只回「打开 App 的那一页」，要再按一次 HOME 才跳默认页。
+# 3) 第二次 HOME 如果落在转场动画里会被直接吞掉（连发 keyevent 3 3 实测无效），
+#    所以必须先确认前台已经切到桌面包名，再多留一点时间等窗口动画收尾。
+#
+# 实测耗时：约 0.7 秒（logcat: HOME 05.077 → 再 HOME 05.295 → goToSleep 05.659），远低于 2 秒要求。
+# 返回 0 = 屏幕已经黑掉；返回 1 = 中途放弃或没黑成。
 go_home_and_sleep() {
     # 超级省电模式下这个功能不生效（用户明确要求）
     if in_super_power; then
         log "idle ${IDLE_TIMEOUT}s but super power active -> skip"
-        return
+        return 1
+    fi
+    if ! screen_is_on; then
+        log "idle ${IDLE_TIMEOUT}s but screen already off -> skip"
+        return 1
     fi
     log "idle ${IDLE_TIMEOUT}s no touch -> home + sleep"
-    # 两个键放在同一次调用里发：input 每次启动都要拉起一个 app_process，
-    # 分成两次调用再加 sleep 1，实测从「判定空闲」到「屏幕黑掉」要 1.7 秒，
-    # 肉眼就是一帧不动的卡顿。放一起后实测 107ms。
-    /system/bin/input keyevent 3 223   # KEYCODE_HOME + KEYCODE_SLEEP
+
+    # ① 回桌面
+    /system/bin/input keyevent 3          # KEYCODE_HOME
+    touch_seen && { log "abort: touch during action"; return 1; }
+
+    # ② 等桌面真的接手（最多约 0.7 秒）
+    n=0
+    while [ "$n" -lt 12 ]; do
+        if /system/bin/dumpsys activity activities 2>/dev/null \
+            | grep -m1 'topResumedActivity' | grep -q "$HOME_PKG"; then
+            break
+        fi
+        touch_seen && { log "abort: touch during action"; return 1; }
+        n=$((n + 1))
+        sleep 0.05
+    done
+    # 前台到位后再等窗口动画收尾，否则第二次 HOME 会被吞
+    [ "$n" -ge 12 ] && log "home timeout: launcher not resumed in 0.7s, press home anyway"
+    sleep 0.12
+    touch_seen && { log "abort: touch during action"; return 1; }
+
+    # ③ 再按一次 HOME → 跳回默认主页面
+    /system/bin/input keyevent 3
+    sleep 0.28
+    touch_seen && { log "abort: touch during action"; return 1; }
+
+    # ④ 息屏，并确认真的黑掉了（SLEEP 键偶尔会被系统吞掉，
+    #    不确认的话下一轮超时又会再发一次，表现成反复黑屏）
+    if screen_is_on; then
+        /system/bin/input keyevent 223     # KEYCODE_SLEEP
+        c=0
+        while [ "$c" -lt 8 ]; do
+            screen_is_on || { log "home + sleep done"; return 0; }
+            c=$((c + 1))
+            sleep 0.06
+        done
+        log "sleep key swallowed -> retry"
+        /system/bin/input keyevent 223
+        sleep 0.12
+        if screen_is_on; then
+            log "sleep failed, give up this round"
+            return 1
+        fi
+    fi
+    log "home + sleep done"
+    return 0
 }
 
 idle_watch() {
@@ -217,10 +292,14 @@ idle_watch() {
         log "idle: $dev not readable, feature disabled"
         return
     fi
-    log "idle watcher started (dev=$dev, timeout=${IDLE_TIMEOUT}s)"
+    IDLE_DEV=$dev
+    HOME_PKG=$(home_pkg)
+    [ -z "$HOME_PKG" ] && HOME_PKG=com.miui.home
+    log "idle watcher started (dev=$dev, home=$HOME_PKG, timeout=${IDLE_TIMEOUT}s)"
 
-    # 上一轮判定时屏幕是不是黑的。用来识别「刚刚才亮屏」——
-    # 那种情况下不能再补一刀息屏，否则表现成「按电源键亮屏，还没碰就又黑了」。
+    # 上一轮结束时屏幕是不是黑的。
+    # 用来识别「刚刚才亮屏」：那种情况下不能再补一刀息屏，
+    # 否则表现成「按电源键亮屏，还没碰就又黑了」。
     screen_was_off=0
 
     while true; do
@@ -230,6 +309,10 @@ idle_watch() {
         # 而一次轻触只产生 6~12 个事件，用 count=64 会读不满、
         # 继续阻塞到超时，等于把正常操作误判成空闲。
         # 只读 1 个事件（24 字节）才能做到「一碰就返回」。
+        #
+        # 计时起点天然紧跟「最后一次触摸」：每读到一个事件就重新起 timeout，
+        # 所以不会出现「还没到点就黑屏」（除非动作期间用户才碰屏幕，
+        # 那种情况由 touch_seen 兜住）。
         timeout "$IDLE_TIMEOUT" dd if="$dev" bs=24 count=1 of=/dev/null 2>/dev/null
         rc=$?
 
@@ -242,20 +325,24 @@ idle_watch() {
         fi
 
         if [ "$rc" = "124" ]; then
-            # 屏幕已经黑了就什么都不做。
-            # 少了这一步，息屏之后每一轮超时都会再发一次 HOME+SLEEP：
-            # 白烧两次 app_process，还会在你刚按下电源键的那一瞬间把你黑掉。
-            if screen_is_on; then
-                if [ "$screen_was_off" = "1" ]; then
-                    # 刚亮屏（上一轮还是黑的），这一轮只用来重置计时
-                    screen_was_off=0
-                    log "idle ${IDLE_TIMEOUT}s but screen just woke -> restart timer"
-                else
-                    go_home_and_sleep
-                fi
-            else
+            if ! screen_is_on; then
+                # 屏幕本来就黑着：什么都不做。
+                # 少了这一步，息屏之后每一轮超时都会再发一次 HOME+SLEEP：
+                # 白烧两次 app_process，还会在你刚按下电源键的那一瞬间把你黑掉。
                 screen_was_off=1
                 log "idle ${IDLE_TIMEOUT}s but screen already off -> skip"
+                continue
+            fi
+            if [ "$screen_was_off" = "1" ]; then
+                # 刚亮屏（上一轮还是黑的），这一轮只用来重置计时
+                screen_was_off=0
+                log "idle ${IDLE_TIMEOUT}s but screen just woke -> restart timer"
+                continue
+            fi
+            # 动作成功（屏幕已确认黑掉）才算「黑屏轮」；
+            # 中途放弃（用户碰了屏幕）就当什么都没发生。
+            if go_home_and_sleep; then
+                screen_was_off=1
             fi
         else
             # 读到事件（rc=0）或设备异常（rc=1）。
