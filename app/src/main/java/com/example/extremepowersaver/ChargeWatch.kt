@@ -28,10 +28,16 @@ object ChargeWatch {
      * 不一致时 App 会自动覆盖重装并重启守护进程——否则已安装的旧脚本永远不升级，
      * 会出现「APK 更新了但行为还是老样子」的诡异故障。
      */
-    const val SCRIPT_VERSION = "3"
+    const val SCRIPT_VERSION = "7"
 
     private const val PIDFILE = "/data/local/tmp/eps_charge_watch.pid"
     private const val LOGFILE = "/data/local/tmp/eps_charge_watch.log"
+
+    /**
+     * 开关状态通过这个配置文件下发给守护脚本。
+     * 脚本启动时读一次，所以改完开关必须重启进程才生效——install() 里已经包含重启。
+     */
+    private const val CFG = "/data/local/tmp/eps_charge_watch.cfg"
 
     /**
      * 校验 pidfile 里的 pid 确实是本守护脚本。
@@ -69,11 +75,37 @@ object ChargeWatch {
         return Status(installed, pid, version)
     }
 
+    /** 按当前开关拼出配置文件应有的内容，用于比对是否「跑偏」。 */
+    private fun configText(ctx: Context): String {
+        val charge = if (Prefs.autoExitOnCharge(ctx)) 1 else 0
+        val idle = if (Prefs.idleScreenOff(ctx)) 1 else 0
+        return "charge=$charge\nidle=$idle\nidle_timeout=${Prefs.IDLE_TIMEOUT_SEC}"
+    }
+
+    /**
+     * 把两个开关的状态写成脚本能读的配置。
+     * 用 printf 直接落盘，避免多一次文件读写。
+     */
+    private fun writeConfig(ctx: Context): Boolean {
+        val r = RootShell.run(
+            "printf '${configText(ctx).replace("\n", "\\n")}\\n' > $CFG; " +
+                "chmod 644 $CFG; cat $CFG",
+            20
+        )
+        Log.i(TAG, "writeConfig => ${r.output}")
+        return r.ok && r.output.contains("charge=")
+    }
+
     /**
      * 安装脚本并立即启动（无需重启）。
      * 返回 (成功, 说明)。
      */
-    fun enable(ctx: Context): Pair<Boolean, String> {
+    fun install(ctx: Context): Pair<Boolean, String> {
+        // 0. 先把开关状态下发，脚本启动时会读
+        if (!writeConfig(ctx)) {
+            return false to "配置写入失败，请确认已授予 root 权限"
+        }
+
         // 1. 把 assets 里的脚本落到 App 私有目录（root 可读）
         val src = File(ctx.filesDir, SCRIPT_NAME)
         try {
@@ -85,10 +117,13 @@ object ChargeWatch {
             return false to "脚本提取失败: ${t.message}"
         }
 
-        // 2. root 安装到 service.d 并做语法检查
+        // 2. root 安装到 service.d 并做语法检查。
+        //    用 tr 去掉可能的 \r：Windows 上编辑过的脚本会带 CRLF，
+        //    而 sh -n 对 CRLF 是「语法通过」（\r 被当成一个不存在的命令），
+        //    装到手机上才发现每行都报 inaccessible or not found。
         val install = RootShell.run(
             "mkdir -p /data/adb/service.d; " +
-                "cp '${src.absolutePath}' $INSTALLED_PATH; " +
+                "tr -d '\\r' < '${src.absolutePath}' > $INSTALLED_PATH; " +
                 "chmod 755 $INSTALLED_PATH; " +
                 "if sh -n $INSTALLED_PATH 2>/dev/null; then echo __SYNTAX_OK__; else echo __SYNTAX_FAIL__; fi",
             40
@@ -121,25 +156,32 @@ object ChargeWatch {
             return false to "脚本已安装，但守护进程未启动成功（重启手机后会自动生效）"
         }
 
-        Prefs.setAutoExitOnCharge(ctx, true)
         return true to "已启用，守护进程 pid=$pid"
     }
 
-    /** 停掉正在运行的实例（不删除脚本）。 */
+    /**
+     * 停掉正在运行的实例（不删除脚本）。
+     *
+     * 必须等进程真的消失再删 pidfile：否则紧接着 install() 拉起的新实例
+     * 会读到还没清理的旧 pidfile，判定「已在运行」直接退出，
+     * 表现为「开关切了但守护进程没起来」。
+     */
     fun stop() {
         RootShell.run(
             "if [ -f $PIDFILE ]; then p=\$(cat $PIDFILE 2>/dev/null); " +
-                "if [ -n \"\$p\" ] && kill -0 \$p 2>/dev/null && $IS_OURS; then kill \$p 2>/dev/null; fi; fi; " +
-                "rm -f $PIDFILE",
-            20
+                "if [ -n \"\$p\" ] && kill -0 \$p 2>/dev/null; then " +
+                "kill \$p 2>/dev/null; " +
+                "i=0; while [ \$i -lt 30 ] && kill -0 \$p 2>/dev/null; do sleep 0.1; i=\$((i+1)); done; " +
+                "kill -9 \$p 2>/dev/null; fi; fi; " +
+                "rm -f $PIDFILE; echo __STOPPED__",
+            40
         )
     }
 
-    /** 彻底关闭：停进程 + 删脚本。 */
-    fun disable(ctx: Context): Pair<Boolean, String> {
+    /** 彻底关闭：停进程 + 删脚本。不改动任何开关状态。 */
+    fun uninstall(): Pair<Boolean, String> {
         stop()
         RootShell.run("rm -f $INSTALLED_PATH", 20)
-        Prefs.setAutoExitOnCharge(ctx, false)
         val st = status()
         return if (!st.installed && !st.running) {
             true to "已关闭并移除守护脚本"
@@ -147,6 +189,16 @@ object ChargeWatch {
             false to "关闭不完全，请手动检查 /data/adb/service.d/"
         }
     }
+
+    /**
+     * 按当前开关状态同步守护进程。
+     *
+     * 两个功能（插电退出、闲置息屏）共用同一个脚本，所以不能各自独立
+     * 安装/卸载——只要还有任意一个开着，脚本就得留着；全关才移除。
+     * 每次切换都会重写配置并重启进程，保证改完立即生效。
+     */
+    fun sync(ctx: Context): Pair<Boolean, String> =
+        if (Prefs.anyWatchEnabled(ctx)) install(ctx) else uninstall()
 
     /** 读取最近若干行运行日志，供设置页排障。 */
     fun recentLog(lines: Int = 6): String {
@@ -164,27 +216,36 @@ object ChargeWatch {
      *   3. 脚本在但进程没跑（刚开机 / 被 kill）→ 重新拉起
      */
     fun ensureInstalled(ctx: Context) {
-        if (!Prefs.autoExitOnCharge(ctx)) {
-            Log.i(TAG, "auto-exit-on-charge disabled by user, skip")
+        if (!Prefs.anyWatchEnabled(ctx)) {
+            Log.i(TAG, "all watch features disabled by user, skip")
             return
         }
         val st = status()
         when {
             !st.installed -> {
                 Log.w(TAG, "script missing, installing")
-                enable(ctx)
+                install(ctx)
             }
             st.outdated -> {
                 Log.w(TAG, "script outdated (v${st.version} -> v$SCRIPT_VERSION), upgrading")
-                enable(ctx)
+                install(ctx)
             }
             !st.running -> {
                 Log.w(TAG, "daemon not running, restarting")
-                RootShell.run(
-                    "nohup sh $INSTALLED_PATH >/dev/null 2>&1 & sleep 1; echo __END__", 20
-                )
+                // 走 install() 而不是直接 nohup，顺手刷新配置
+                install(ctx)
             }
-            else -> Log.i(TAG, "daemon healthy, pid=${st.pid} ver=${st.version}")
+            else -> {
+                // 进程健康，但配置可能与开关对不上（手工改过 cfg、
+                // 或者上一个版本留下的旧值）。对不上就重装一次纠正过来。
+                val actual = RootShell.run("cat $CFG 2>/dev/null", 15).output.trim()
+                if (actual != configText(ctx)) {
+                    Log.w(TAG, "config drift, reapplying: [$actual] != [${configText(ctx)}]")
+                    install(ctx)
+                } else {
+                    Log.i(TAG, "daemon healthy, pid=${st.pid} ver=${st.version}")
+                }
+            }
         }
     }
 }

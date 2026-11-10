@@ -10,6 +10,10 @@ object Prefs {
     private const val KEY_COMMAND = "command"
     private const val KEY_SHOW_TOAST = "show_toast"
     private const val KEY_AUTO_EXIT_ON_CHARGE = "auto_exit_on_charge"
+    private const val KEY_IDLE_SCREEN_OFF = "idle_screen_off"
+
+    /** 闲置多久判定为「没人在用」，单位秒。改这里就能调整时长。 */
+    const val IDLE_TIMEOUT_SEC = 180
 
     /** 默认命令：进入超级省电（已在小米11 / MIUI14 / Android13 实测可用） */
     const val DEFAULT_ENTER =
@@ -59,4 +63,24 @@ object Prefs {
         ctx.getSharedPreferences(SP, Context.MODE_PRIVATE)
             .edit().putBoolean(KEY_AUTO_EXIT_ON_CHARGE, v).apply()
     }
+
+    /**
+     * 是否启用「闲置息屏」：连续 [IDLE_TIMEOUT_SEC] 秒没有任何触屏，
+     * 就退回桌面并息屏。超级省电模式下不生效。
+     *
+     * 默认 true —— 这个功能本质是把系统自动锁屏的时长管起来，
+     * 开着不会比系统默认更打扰（系统默认通常 30 秒~2 分钟就锁了）。
+     */
+    fun idleScreenOff(ctx: Context): Boolean =
+        ctx.getSharedPreferences(SP, Context.MODE_PRIVATE)
+            .getBoolean(KEY_IDLE_SCREEN_OFF, true)
+
+    fun setIdleScreenOff(ctx: Context, v: Boolean) {
+        ctx.getSharedPreferences(SP, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_IDLE_SCREEN_OFF, v).apply()
+    }
+
+    /** 是否有任意一个守护功能处于开启状态（决定脚本要不要装）。 */
+    fun anyWatchEnabled(ctx: Context): Boolean =
+        autoExitOnCharge(ctx) || idleScreenOff(ctx)
 }

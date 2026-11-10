@@ -25,6 +25,8 @@
 - **打开即进入**：点图标直接切到 MIUI 原生超级省电模式，无确认弹窗、无需二次点击。
 - **插电自动退出**：进入省电后接上电源，1~8 秒内自动退出。
   由 root 守护进程实现（不依赖 App 存活），因此超级省电把 App 冻结后依然有效。
+- **闲置息屏**：连续 3 分钟没有任何触屏，自动退回桌面并息屏。
+  只认真实触屏（不看按键、传感器），**超级省电模式下不生效**。
 - **命令可改**：默认内置「进入 / 退出」两条命令，也可以换成任意 root 命令。
 
 ## 环境要求
@@ -211,7 +213,98 @@ adb shell su -c 'P=$(cat /data/local/tmp/eps_charge_watch.pid); [ -d /proc/$P ] 
 注意不要用 `ps -A | grep eps_charge` 判断——Android 的 `ps` 只显示 15 字符的 `Name`（`sh`），
 查不到脚本名。
 
-## 五、编译
+## 五、闲置息屏：3 分钟没碰屏幕就回桌面并息屏
+
+### 5.1 需求边界
+
+- 只监控**真实触屏**，不看按键、传感器、音量、音频播放
+- 连续 3 分钟没有任何触屏 → 回桌面（`KEYCODE_HOME`）+ 息屏（`KEYCODE_SLEEP`）
+- **超级省电模式下不生效**：省电模式有自己的休眠策略，这段逻辑会主动跳过
+
+### 5.2 为什么不能做成普通 App 功能
+
+Android 没有「上次触摸时间」这种公开 API，几条常见路都走不通：
+
+| 方案 | 为什么不选 |
+|---|---|
+| `AccessibilityService` 监听点击 | 要用户手动去无障碍里授权，事件粒度粗，滑动不触发 |
+| 前台服务轮询 `dumpsys` | 几十毫秒一次，耗电比省下来的还多 |
+| 读 `/proc/interrupts` 中断计数 | 依赖触屏中断名，换台机器基本对不上 |
+
+所以直接读触屏设备的 evdev 节点，用**阻塞读**——有事件立刻返回，没事件就睡在内核里：
+
+```bash
+timeout 180 dd if=/dev/input/event4 bs=24 count=1 of=/dev/null
+```
+
+- 有触摸 → `dd` 立刻返回（rc=0），循环继续
+- 180 秒一个事件都没有 → `timeout` 杀掉 `dd`（rc=124），判定为空闲
+
+**关键细节：`count` 必须写 1。** dd 会一直读到凑满 count 个 block 才返回，
+而一次轻触只产生 6~12 个事件——写成 `count=64` 会读不满、继续阻塞到超时，
+把「用户正在操作」误判成「没人在用」。这个坑是在真机上撞出来的。
+
+### 5.3 触屏节点怎么定位
+
+扫 `/proc/bus/input/devices`，按名字匹配 `touch|fts|goodix|synaptics|nt36|gt9|ilitek|himax`，
+**同时必须排除 `uinput-*`**：那是 `input` 命令和自动化脚本注入事件用的虚拟设备，
+不排除的话用 adb 点一下屏幕就把计时重置了，等于监控失效。
+
+小米 11 实测：
+
+| 设备 | 节点 | 用途 |
+|---|---|---|
+| `fts` | `/dev/input/event4` | 真实触屏（Focus Touch Screen），要监控的就是它 |
+| `uinput-goodix` | `/dev/input/event3` | 虚拟注入设备，必须排除 |
+
+### 5.4 怎么判断「当前在超级省电模式」
+
+这里踩过一个很隐蔽的坑：`EXTREME_POWER_SAVE_MODE_OPEN` 在小米 11 上**恒为 1**
+（就是第一节说的那个没人监听的废弃键）。拿它判断会把「正常使用中」当成「省电模式」，
+结果闲置功能被整段跳过——日志里只有一句 `idle 30s but super power active -> skip`。
+
+实测可用的判据：
+
+| 状态 | `POWER_SAVE_MODE_OPEN` | Activity 栈里 `com.miui.superpower` |
+|---|---|---|
+| 普通模式 | `0` | 0 行 |
+| 超级省电 | `1` | 19~28 行 |
+
+所以先用轻量的设置键，不命中再查 Activity 栈兜底（后者跨机型更通用，
+但要 fork 一次 `dumpsys`，约 50ms，所以只当兜底）。
+
+### 5.5 开销
+
+- **空闲时零 CPU**：dd 阻塞在内核等待队列里，不是轮询，不产生唤醒
+- 有触摸时每个事件 fork 一对 `timeout`+`dd`，滑动时约 5~7 次/秒（0.15 秒节流控制）
+- 实测（充电中，最坏情况，每 30 秒还要查一次省电状态）：60 秒累计 **60ms，约 0.1% 单核**
+- 不充电时更低——那时没有任何周期性唤醒
+
+### 5.6 和充电退出怎么共存
+
+两个功能共用同一个守护脚本，开关状态由 App 写在：
+
+```
+/data/local/tmp/eps_charge_watch.cfg
+charge=1
+idle=1
+idle_timeout=180
+```
+
+脚本启动时读一次。任一功能开启就保留脚本，两个都关才删脚本和进程。
+App 每次启动会比对配置文件与开关状态，不一致就重装纠正（防止手工改过或旧版本残留）。
+
+### 5.7 两个必须知道的实现细节
+
+1. **孤儿自检**：idle 循环是主进程 fork 出来的子 shell。主进程被 `kill -9` 时
+   trap 来不及执行，子 shell 会变成孤儿继续跑，替一个已经不存在的守护进程息屏。
+   所以每轮循环都会 `kill -0 $$` 检查主进程（子 shell 里 `$$` 仍是主进程 PID），
+   父进程没了就自己退出。
+2. **脚本必须是 LF**：Windows 上编辑过的 `.sh` 带 CRLF，装到手机上每行都会报
+   `inaccessible or not found`，而 `sh -n` 语法检查却是通过的（`\r` 被当成一个命令名）。
+   安装时统一走 `tr -d '\r'` 兜底。
+
+## 六、编译
 
 需要 JDK 17 + Android SDK（platform 34）。仓库自带 Gradle Wrapper（8.7）。
 
@@ -230,7 +323,7 @@ echo "sdk.dir=/path/to/Android/sdk" > local.properties
 本机实测可用环境：JDK 17 + Android SDK platform-34（build-tools 34.0.0），
 Gradle 由仓库自带的 Wrapper 8.7 提供，不需要单独安装。
 
-## 六、代码结构
+## 七、代码结构
 
 | 文件 | 作用 |
 |---|---|
@@ -241,7 +334,7 @@ Gradle 由仓库自带的 Wrapper 8.7 提供，不需要单独安装。
 | `Prefs.kt` | 命令与开关的本地存储 |
 | `assets/eps_charge_watch.sh` | 守护脚本本体（开机自启 + 脱壳 + sysfs 轮询 + 调 provider 退出） |
 
-## 七、已知问题与注意事项
+## 八、已知问题与注意事项
 
 - **首次运行必须在 Magisk 弹窗点「允许」**，否则 `su -c id` 返回 `Permission denied`，
   App 会提示"未获得 root 权限"。可通过 logcat 过滤 `EPS` 标签排查。
@@ -259,7 +352,7 @@ Gradle 由仓库自带的 Wrapper 8.7 提供，不需要单独安装。
 - 换 MIUI / HyperOS 版本后，若 `content call` 报 `IllegalArgumentException` 或无效，
   说明 provider 的 method 或 key 变了，需要重新反编译确认。
 
-## 八、参考
+## 九、参考
 
 最初思路来自社区里的一个 Vector / Xposed 模块（通过注入 `system_server` 监听电量来写设置键）。
 该项目改为**普通 APK + root + 直接调用 PowerSaverProvider**，

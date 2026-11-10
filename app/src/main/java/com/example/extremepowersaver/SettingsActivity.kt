@@ -24,6 +24,7 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var tvResult: TextView
     private lateinit var cbToast: CheckBox
     private lateinit var cbAutoExit: CheckBox
+    private lateinit var cbIdle: CheckBox
     private lateinit var tvWatchStatus: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -34,6 +35,7 @@ class SettingsActivity : AppCompatActivity() {
         tvResult = findViewById(R.id.tvResult)
         cbToast = findViewById(R.id.cbToast)
         cbAutoExit = findViewById(R.id.cbAutoExit)
+        cbIdle = findViewById(R.id.cbIdle)
         tvWatchStatus = findViewById(R.id.tvWatchStatus)
 
         editCommand.setText(Prefs.command(this))
@@ -41,7 +43,15 @@ class SettingsActivity : AppCompatActivity() {
 
         // 先设初始状态再挂监听，避免恢复状态时误触发安装
         cbAutoExit.isChecked = Prefs.autoExitOnCharge(this)
-        cbAutoExit.setOnCheckedChangeListener { _, checked -> onAutoExitToggled(checked) }
+        cbIdle.isChecked = Prefs.idleScreenOff(this)
+        cbAutoExit.setOnCheckedChangeListener { _, checked ->
+            Prefs.setAutoExitOnCharge(this, checked)
+            applyWatch()
+        }
+        cbIdle.setOnCheckedChangeListener { _, checked ->
+            Prefs.setIdleScreenOff(this, checked)
+            applyWatch()
+        }
         refreshWatchStatus()
 
         findViewById<Button>(R.id.btnPresetEnter).setOnClickListener {
@@ -61,24 +71,22 @@ class SettingsActivity : AppCompatActivity() {
     /** 用于抑制「程序回滚勾选状态」时再次触发监听 */
     private var updatingUi = false
 
-    private fun onAutoExitToggled(checked: Boolean) {
+    /**
+     * 两个守护开关共用同一个脚本，所以统一走一次 sync：
+     * 只要还有任意一个开着就安装/重启，全关才移除脚本。
+     */
+    private fun applyWatch() {
         if (updatingUi) return
         cbAutoExit.isEnabled = false
-        tvWatchStatus.text = if (checked) "正在安装 root 守护进程…" else "正在关闭…"
+        cbIdle.isEnabled = false
+        tvWatchStatus.text = "正在应用设置…"
 
         executor.execute {
-            val (ok, msg) = if (checked) ChargeWatch.enable(this) else ChargeWatch.disable(this)
+            val (ok, msg) = ChargeWatch.sync(this)
             main.post {
                 cbAutoExit.isEnabled = true
+                cbIdle.isEnabled = true
                 if (!ok) Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-
-                // 勾选状态以实际生效结果为准
-                val real = Prefs.autoExitOnCharge(this)
-                if (cbAutoExit.isChecked != real) {
-                    updatingUi = true
-                    cbAutoExit.isChecked = real
-                    updatingUi = false
-                }
                 refreshWatchStatus()
             }
         }
