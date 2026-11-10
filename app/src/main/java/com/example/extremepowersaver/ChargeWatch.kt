@@ -28,7 +28,7 @@ object ChargeWatch {
      * 不一致时 App 会自动覆盖重装并重启守护进程——否则已安装的旧脚本永远不升级，
      * 会出现「APK 更新了但行为还是老样子」的诡异故障。
      */
-    const val SCRIPT_VERSION = "7"
+    const val SCRIPT_VERSION = "9"
 
     private const val PIDFILE = "/data/local/tmp/eps_charge_watch.pid"
     private const val LOGFILE = "/data/local/tmp/eps_charge_watch.log"

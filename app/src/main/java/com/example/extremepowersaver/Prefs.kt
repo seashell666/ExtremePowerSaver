@@ -13,7 +13,7 @@ object Prefs {
     private const val KEY_IDLE_SCREEN_OFF = "idle_screen_off"
 
     /** 闲置多久判定为「没人在用」，单位秒。改这里就能调整时长。 */
-    const val IDLE_TIMEOUT_SEC = 180
+    const val IDLE_TIMEOUT_SEC = 7
 
     /** 默认命令：进入超级省电（已在小米11 / MIUI14 / Android13 实测可用） */
     const val DEFAULT_ENTER =

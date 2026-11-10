@@ -28,7 +28,7 @@
 export PATH=/system/bin:/system/xbin:/sbin:/data/adb/magisk:$PATH
 
 # 脚本版本：App 侧会比对，不一致就自动重装覆盖（否则老脚本永远不升级）
-EPS_SCRIPT_VERSION=7
+EPS_SCRIPT_VERSION=9
 
 PIDFILE=/data/local/tmp/eps_charge_watch.pid
 LOG=/data/local/tmp/eps_charge_watch.log
@@ -47,7 +47,8 @@ if [ -r "$CFG" ]; then
     v=$(sed -n 's/^idle=//p' "$CFG" 2>/dev/null | head -n1)
     [ -n "$v" ] && ENABLE_IDLE=$v
     v=$(sed -n 's/^idle_timeout=//p' "$CFG" 2>/dev/null | head -n1)
-    if [ -n "$v" ] && [ "$v" -ge 30 ] 2>/dev/null; then
+    # 下限 5 秒：防止配置被误写成 0/1 导致瞬间反复息屏
+    if [ -n "$v" ] && [ "$v" -ge 5 ] 2>/dev/null; then
         IDLE_TIMEOUT=$v
     fi
 fi
@@ -186,6 +187,12 @@ find_touch_dev() {
     ' /proc/bus/input/devices 2>/dev/null
 }
 
+# 屏幕是否真的亮着。
+# 只认 Awake：Dozing 是 AOD/息屏显示，屏幕已经黑了，不需要再动。
+screen_is_on() {
+    /system/bin/dumpsys power 2>/dev/null | grep -q 'mWakefulness=Awake'
+}
+
 # 空闲到点后的动作：回桌面 + 息屏
 go_home_and_sleep() {
     # 超级省电模式下这个功能不生效（用户明确要求）
@@ -194,9 +201,10 @@ go_home_and_sleep() {
         return
     fi
     log "idle ${IDLE_TIMEOUT}s no touch -> home + sleep"
-    /system/bin/input keyevent 3      # KEYCODE_HOME
-    sleep 1
-    /system/bin/input keyevent 223    # KEYCODE_SLEEP
+    # 两个键放在同一次调用里发：input 每次启动都要拉起一个 app_process，
+    # 分成两次调用再加 sleep 1，实测从「判定空闲」到「屏幕黑掉」要 1.7 秒，
+    # 肉眼就是一帧不动的卡顿。放一起后实测 107ms。
+    /system/bin/input keyevent 3 223   # KEYCODE_HOME + KEYCODE_SLEEP
 }
 
 idle_watch() {
@@ -210,6 +218,10 @@ idle_watch() {
         return
     fi
     log "idle watcher started (dev=$dev, timeout=${IDLE_TIMEOUT}s)"
+
+    # 上一轮判定时屏幕是不是黑的。用来识别「刚刚才亮屏」——
+    # 那种情况下不能再补一刀息屏，否则表现成「按电源键亮屏，还没碰就又黑了」。
+    screen_was_off=0
 
     while true; do
         # 阻塞读，无事件时会一直挂在这里，直到 timeout 把它杀掉（rc=124）。
@@ -230,11 +242,26 @@ idle_watch() {
         fi
 
         if [ "$rc" = "124" ]; then
-            go_home_and_sleep
+            # 屏幕已经黑了就什么都不做。
+            # 少了这一步，息屏之后每一轮超时都会再发一次 HOME+SLEEP：
+            # 白烧两次 app_process，还会在你刚按下电源键的那一瞬间把你黑掉。
+            if screen_is_on; then
+                if [ "$screen_was_off" = "1" ]; then
+                    # 刚亮屏（上一轮还是黑的），这一轮只用来重置计时
+                    screen_was_off=0
+                    log "idle ${IDLE_TIMEOUT}s but screen just woke -> restart timer"
+                else
+                    go_home_and_sleep
+                fi
+            else
+                screen_was_off=1
+                log "idle ${IDLE_TIMEOUT}s but screen already off -> skip"
+            fi
         else
             # 读到事件（rc=0）或设备异常（rc=1）。
             # 轻微节流：滑动时事件很密集，不节流会疯狂 fork。
             # 事件留在内核 buffer 里不会丢，下次读立刻就能拿到。
+            screen_was_off=0
             sleep 0.15
         fi
     done
