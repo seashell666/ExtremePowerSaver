@@ -28,9 +28,10 @@
 export PATH=/system/bin:/system/xbin:/sbin:/data/adb/magisk:$PATH
 
 # 脚本版本：App 侧会比对，不一致就自动重装覆盖（否则老脚本永远不升级）
-EPS_SCRIPT_VERSION=10
+EPS_SCRIPT_VERSION=12
 
 PIDFILE=/data/local/tmp/eps_charge_watch.pid
+IDLEPIDFILE=/data/local/tmp/eps_charge_watch.idle.pid
 LOG=/data/local/tmp/eps_charge_watch.log
 CFG=/data/local/tmp/eps_charge_watch.cfg
 URI=content://com.miui.powercenter.powersaver
@@ -38,7 +39,7 @@ URI=content://com.miui.powercenter.powersaver
 # ---- 默认值：两个功能都开（App 会写 cfg 覆盖）----
 ENABLE_CHARGE=1
 ENABLE_IDLE=1
-IDLE_TIMEOUT=180
+IDLE_TIMEOUT=447
 
 if [ -r "$CFG" ]; then
     v=""
@@ -79,13 +80,36 @@ echo $$ > "$PIDFILE"
 
 IDLE_PID=""
 
+# 清掉上一条命留下的 idle 子进程。
+#
+# 为什么必须单独记它的 pid：idle 子进程常年阻塞在 `timeout 447 dd` 里，
+# 而 mksh 的 trap 要等当前前台命令结束才执行——给主进程发 TERM 时，
+# 主进程 2 秒内就退了，子进程却会一直卡在这个 dd 上，最长要等满 447 秒
+# 才看到 TERM。这期间它仍然有能力执行「回桌面+息屏」，
+# 表现就是「已经关掉了/换过配置，还会莫名其妙黑屏」。
+# 所以：子进程 pid 单独落盘，清理时一律 kill -9（SIGKILL 无法被延迟）。
+kill_stale_idle() {
+    [ -f "$IDLEPIDFILE" ] || return 0
+    old=""
+    read old < "$IDLEPIDFILE" 2>/dev/null
+    if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
+        if tr '\0' ' ' < "/proc/$old/cmdline" 2>/dev/null | grep -q eps_charge_watch; then
+            kill -9 "$old" 2>/dev/null
+            log "killed stale idle watcher (pid $old)"
+        fi
+    fi
+    rm -f "$IDLEPIDFILE"
+}
+kill_stale_idle
+
 # 只监听真实终止信号，不要用 EXIT。
 # 原因：命令替换 $(date ...) / $(settings get ...) 会 fork 子 shell，
 # 子 shell 继承 EXIT trap，退出时也会打一条「daemon exiting」，实测造成
 # 「守护进程已死」的假象，严重误导排障。
 cleanup() {
     log "daemon terminating (pid $$)"
-    [ -n "$IDLE_PID" ] && kill "$IDLE_PID" 2>/dev/null
+    [ -n "$IDLE_PID" ] && kill -9 "$IDLE_PID" 2>/dev/null
+    rm -f "$IDLEPIDFILE"
     exit 0
 }
 trap cleanup TERM INT HUP
@@ -321,6 +345,7 @@ idle_watch() {
         # 行息屏动作——实测切换脚本版本时真的遇到过两个实例抢着息屏。
         if ! kill -0 $$ 2>/dev/null; then
             log "idle: parent (pid $$) gone, exiting"
+            rm -f "$IDLEPIDFILE"
             return
         fi
 
@@ -411,6 +436,7 @@ log "features: charge=$ENABLE_CHARGE idle=$ENABLE_IDLE timeout=${IDLE_TIMEOUT}s"
 if [ "$ENABLE_IDLE" = "1" ]; then
     idle_watch &
     IDLE_PID=$!
+    echo $IDLE_PID > "$IDLEPIDFILE"
 fi
 
 if [ "$ENABLE_CHARGE" = "1" ]; then

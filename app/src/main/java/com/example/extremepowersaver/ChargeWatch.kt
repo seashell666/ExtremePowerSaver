@@ -28,9 +28,19 @@ object ChargeWatch {
      * 不一致时 App 会自动覆盖重装并重启守护进程——否则已安装的旧脚本永远不升级，
      * 会出现「APK 更新了但行为还是老样子」的诡异故障。
      */
-    const val SCRIPT_VERSION = "10"
+    const val SCRIPT_VERSION = "12"
 
     private const val PIDFILE = "/data/local/tmp/eps_charge_watch.pid"
+
+    /**
+     * 闲置子进程的 pid。必须单独记：
+     * 它常年阻塞在 `timeout 447 dd` 上，mksh 的 trap 要等前台命令结束才执行，
+     * 所以 TERM 杀不掉它，最长要等满一个超时周期（447 秒）。
+     * 这期间它还能执行「回桌面+息屏」——表现就是「开关关了/换了配置还会黑屏」。
+     * 停进程时必须单独对它 kill -9。
+     */
+    private const val IDLEPIDFILE = "/data/local/tmp/eps_charge_watch.idle.pid"
+
     private const val LOGFILE = "/data/local/tmp/eps_charge_watch.log"
 
     /**
@@ -168,12 +178,16 @@ object ChargeWatch {
      */
     fun stop() {
         RootShell.run(
-            "if [ -f $PIDFILE ]; then p=\$(cat $PIDFILE 2>/dev/null); " +
+            // 先 kill -9 闲置子进程：它阻塞在 dd 上，TERM 会被延后到超时那一刻，
+            // 留着它就会出现「已经停了/换了配置，还会莫名黑屏」。
+            "if [ -f $IDLEPIDFILE ]; then c=\$(cat $IDLEPIDFILE 2>/dev/null); " +
+                "if [ -n \"\$c\" ] && kill -0 \$c 2>/dev/null; then kill -9 \$c 2>/dev/null; fi; fi; " +
+                "if [ -f $PIDFILE ]; then p=\$(cat $PIDFILE 2>/dev/null); " +
                 "if [ -n \"\$p\" ] && kill -0 \$p 2>/dev/null; then " +
                 "kill \$p 2>/dev/null; " +
-                "i=0; while [ \$i -lt 30 ] && kill -0 \$p 2>/dev/null; do sleep 0.1; i=\$((i+1)); done; " +
+                "i=0; while [ \$i -lt 20 ] && kill -0 \$p 2>/dev/null; do sleep 0.1; i=\$((i+1)); done; " +
                 "kill -9 \$p 2>/dev/null; fi; fi; " +
-                "rm -f $PIDFILE; echo __STOPPED__",
+                "rm -f $PIDFILE $IDLEPIDFILE; echo __STOPPED__",
             40
         )
     }

@@ -251,7 +251,7 @@
                     android:paddingTop="2dp"
                     android:paddingEnd="7dp"
                     android:paddingBottom="2dp"
-                    android:text="3 分钟"
+                    android:text="7 分 27 秒"
                     android:textColor="@color/festive_red"
                     android:textSize="10sp" />
             </LinearLayout>
@@ -261,7 +261,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 android:lineSpacingExtra="3dp"
-                android:text="连续 3 分钟没有任何触屏（只认真实触屏，不看按键、传感器），就先退回桌面默认主页面、再息屏，全程约 1 秒。超级省电模式下不生效。"
+                android:text="连续 7 分 27 秒（447 秒）没有任何触屏（只认真实触屏，不看按键、传感器），就先退回桌面默认主页面、再息屏，全程约 1 秒。超级省电模式下不生效。"
                 android:textColor="@color/text_body"
                 android:textSize="12sp" />
 
@@ -271,7 +271,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
                 android:buttonTint="@color/festive_red"
-                android:text="3 分钟无触屏自动息屏"
+                android:text="7 分 27 秒无触屏自动息屏"
                 android:textColor="@color/text_dark"
                 android:textSize="13sp"
                 app:buttonTint="@color/festive_red" />
