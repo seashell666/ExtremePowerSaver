@@ -25,8 +25,8 @@
 - **打开即进入**：点图标直接切到 MIUI 原生超级省电模式，无确认弹窗、无需二次点击。
 - **插电自动退出**：进入省电后接上电源，1~8 秒内自动退出。
   由 root 守护进程实现（不依赖 App 存活），因此超级省电把 App 冻结后依然有效。
-- **充电满 77% 自动退出并息屏**：充电中如果还停在超级省电里（插电后又手动进去的那种），
-  电量一超过 77% 就自动退出超级省电，并把还亮着的屏幕直接关掉。
+- **充电满 77% 自动退出**：充电中如果还停在超级省电里（插电后又手动进去的那种），
+  电量一超过 77% 就自动退出超级省电；此时没在用手机（前台是桌面）才顺带息屏。
 - **闲置息屏**：连续 7 分 27 秒（447 秒）没有任何触屏，自动退回桌面默认主页面并息屏。
   只认真实触屏（不看按键、传感器），**超级省电模式下不生效**。
 - **命令可改**：默认内置「进入 / 退出」两条命令，也可以换成任意 root 命令。
@@ -113,7 +113,7 @@ adb shell su -c "pm install -r -t /data/local/tmp/eps.apk"
 2. 之后每次点开图标，就会自动进入超级省电模式。
 3. 长按图标 → 「命令设置」：可改命令、切换成"退出超级省电"预设、立即测试。
 
-## 四、充电相关自动化：插电即退 / 满 77% 退出并息屏
+## 四、充电相关自动化：插电即退 / 满 77% 退出
 
 ### 4.1 为什么不能像普通 App 那样监听
 
@@ -151,7 +151,7 @@ App 把一个 shell 脚本安装到 Magisk 的 `service.d`：
   这是跨机型/跨 MIUI 版本最可靠的路径——不依赖 `POWER_SAVE_MODE_OPEN` 这类实现细节
   （不同版本可能是 `EXTREME_POWER_SAVE_MODE_OPEN` 等）。实测不在省电状态时调用是无害空操作。
 - **规则二 · 充电中电量超过 77%**：充电期间每 30 秒复查一次，只有「确实还在超级省电
-  且电量严格大于 77%」才退出，退出后立刻息屏。详见 4.8。
+  且电量严格大于 77%」才退出；前台不是普通 App 时再顺带息屏。详见 4.8 / 4.9。
 - 退出后会 `sleep 12`（规则一）／`sleep 8`（规则二）等 MIUI 切换动画结束，避免紧接着的复查误判。
 
 ### 4.3 开销实测（小米 11 / Android 13）
@@ -221,7 +221,7 @@ adb shell su -c 'P=$(cat /data/local/tmp/eps_charge_watch.pid); [ -d /proc/$P ] 
 注意不要用 `ps -A | grep eps_charge` 判断——Android 的 `ps` 只显示 15 字符的 `Name`（`sh`），
 查不到脚本名。
 
-### 4.8 充电中电量超过 77% → 退出超级省电 + 立刻息屏（v1.5 起）
+### 4.8 充电中电量超过 77% → 退出超级省电（没在用手机时顺带息屏）（v1.5 起，v1.6 修判定）
 
 **同时满足**三个条件才动手：正在充电、仍处于超级省电、电量**严格大于** 77%
 （77% 不动，78% 才动）。
@@ -242,9 +242,13 @@ adb shell su -c 'P=$(cat /data/local/tmp/eps_charge_watch.pid); [ -d /proc/$P ] 
    超级省电才动手（≈60 秒）。少了这一步，插着电点开 App 刚进去、下一秒就被踢出来顺手黑屏，
    看起来就像坏了。电量是后来才涨上去的（进省电时还没到门槛），就不受这条限制，
    涨过门槛的那次复查直接动手。
-4. **退出后立刻息屏**：`KEYCODE_SLEEP` → 轮询 `mWakefulness` 确认真的黑了，被系统吞键就补发一次。
-   屏幕本来就黑着则什么都不做（日志 `screen already off`），免得白拉两次 `app_process`。
+4. **退出后息屏，但用户在别的 App 里就不息屏**：`KEYCODE_SLEEP` → 轮询 `mWakefulness`
+   确认真的黑了，被系统吞键就补发一次。屏幕本来就黑着则什么都不做（日志 `screen already off`）。
+   动手前还会看一眼前台：如果 `topResumedActivity` 是普通 App（抖音、浏览器…），
+   只记 `user is in an app -> keep screen on` 而不关屏——正常路径下这时前台是桌面，
+   照常息屏；这一条是防止判定再出偏差时把正在看的屏幕黑掉。
 5. **退出与息屏之间隔 1.5 秒**：超级省电的桌面切回普通桌面有转场，太早发 SLEEP 会被吞掉。
+6. **「是否处于超级省电」必须只看当前前台，不能 grep 整个 dumpsys**（v1.6 修的严重 bug，见 4.9）。
 
 实测（小米 11，电量 65%、把门槛临时调成 60% 以便触发）：
 
@@ -257,7 +261,7 @@ adb shell su -c 'P=$(cat /data/local/tmp/eps_charge_watch.pid); [ -d /proc/$P ] 
 从判定到黑屏约 **4 秒**（含 1.5 秒等待转场 + 两次判屏）。日志：
 
 ```
-charging + super power + battery 65% > 60% -> leave + screen off
+charging + super power + battery 65% > 60% -> leave
 screen off done
 ```
 
@@ -277,12 +281,62 @@ adb shell su -c 'sh /data/adb/service.d/eps_charge_watch.sh'
 adb shell su -c 'tail -f /data/local/tmp/eps_charge_watch.log'
 ```
 
-看到 `battery 65% > 60% -> leave + screen off` 和 `screen off done` 就是生效了。
+看到 `battery 65% > 60% -> leave` 和 `screen off done` 就是生效了。
 注意这只是临时生效：**App 下次启动会比对 cfg 与代码里的常量，不一致就覆盖回去**，
 要长期改请改 `Prefs.EXIT_BATTERY_PCT` 重新编译。
 
 如果要验证「不到门槛就不退」，就把门槛调回 77 以上（例如 99），
 同样等 60~90 秒，日志里应当只有 `keep staying`，超级省电状态和屏幕都保持原样。
+
+### 4.9 v1.5 的严重 bug：判定被 dumpsys 的历史文本骗了（v1.6 修复）
+
+**现象**：插着电、电量 80% 左右，正在刷抖音，**屏幕每隔 70 秒被强行黑一次**，
+亮屏后一分钟多又黑，反复不停；黑屏时声音还在播。日志长这样：
+
+```
+11-19 15:29:35 charging + super power + battery 78% > 77% -> leave + screen off
+11-19 15:29:38 screen off done
+11-19 15:30:47 charging + super power + battery 78% > 77% -> leave + screen off
+...
+```
+
+**根因**：`in_super_power()` 的兜底是 `dumpsys activity activities | grep -q com.miui.superpower`，
+grep 的是**整个输出文本**。而 `dumpsys activity activities` 里有一个 `RotationHistory` 小节，
+会把**曾经**打开过的 ActivityRecord 连同包名一直留在里面：
+
+```
+RotationHistory
+  11-19 11:47:04.578 ROTATION_90 to ROTATION_0
+    source=ActivityRecord{b1e51fb u0 com.miui.securitycenter/
+           com.miui.superpower.SuperPowerProgressActivity} t11433}
+```
+
+只要在 App 里进过一次超级省电（会短暂出现 `SuperPowerProgressActivity`），
+这行文本就永久留在 dump 里。于是：
+
+- `POWER_SAVE_MODE_OPEN` 明明是 `0`（已经不在省电）
+- 但 grep 整个输出照样命中 → 函数**恒为 true**
+
+规则二因此每 70 秒误触发一次「退出 + 息屏」。退出命令是空操作（本来就没在省电），
+但 `KEYCODE_SLEEP` 是真的，正在用的屏幕就被关掉了。
+`sp_seen >= 2` 那道防线只能防「刚进入时的抖动」，防不住「判断函数恒为真」。
+
+实测对照（同一时刻，已退出超级省电）：
+
+| 判据 | 结果 |
+|---|---|
+| `settings get system POWER_SAVE_MODE_OPEN` | `0` |
+| `dumpsys activity activities \| grep -c com.miui.superpower` | `1`（命中 RotationHistory） |
+| 旧判据（grep 全文本） | **true（错）** |
+| 新判据（只看 `topResumedActivity`） | **false（对）** |
+
+真在超级省电时，`topResumedActivity` 是
+`com.miui.securityadd/com.miui.superpower.SuperPowerLauncherActivity`，新判据照样命中，
+所以功能没有回退（实测 16:22:45 `-> leave` / 16:22:48 `screen off done`）。
+
+**教训**：`dumpsys` 的输出里混着大量历史与统计信息，用 grep 全文本判断"当前状态"
+迟早会被残留骗到。要判断状态就只取表示当前状态的那一行（`topResumedActivity` /
+`mCurrentFocus`），或者干脆读设置键。
 
 ## 五、闲置息屏：7 分 27 秒没碰屏幕就回默认主页并息屏
 
@@ -413,6 +467,11 @@ App 每次启动会比对配置文件与开关状态，不一致就重装纠正�
    这段时间它仍然能执行「回桌面+息屏」，表现就是「开关已经关了、配置也换了，
    还会莫名黑屏」。所以脚本把子进程 pid 单独写到 `eps_charge_watch.idle.pid`，
    清理时一律 `kill -9`（SIGKILL 不可延迟），新实例启动时也会先清掉上一条命的残留。
+10. **判断状态不要 grep 整个 dumpsys**：`dumpsys activity activities` 里混着
+   `RotationHistory` 这类历史小节，会把「曾经打开过的 Activity」连同包名一直留在输出里。
+   拿它做 `grep -q 包名` 判断「当前是否在超级省电」，只要历史上进过一次就会**永久为真**——
+   v1.5 因此每 70 秒把正在用的屏幕关掉一次（详见 4.9）。
+   要判断当前状态就只取 `topResumedActivity` / `mCurrentFocus` 那一行，或者直接读设置键。
 
 ## 六、编译
 
@@ -442,7 +501,7 @@ Gradle 由仓库自带的 Wrapper 8.7 提供，不需要单独安装。
 | `ChargeWatch.kt` | 充电守护进程的安装/启停/状态查询（写 service.d、拉起、校验 pid 身份） |
 | `SettingsActivity.kt` | 命令编辑、预设（进入/退出）、立即测试、充电自动退出开关与状态 |
 | `Prefs.kt` | 命令与开关的本地存储 |
-| `assets/eps_charge_watch.sh` | 守护脚本本体（开机自启 + 脱壳 + sysfs 轮询 + 调 provider 退出 + 满 77% 退出并息屏） |
+| `assets/eps_charge_watch.sh` | 守护脚本本体（开机自启 + 脱壳 + sysfs 轮询 + 调 provider 退出 + 满 77% 退出；v15 起判定只看前台） |
 
 ## 八、已知问题与注意事项
 
@@ -464,7 +523,21 @@ Gradle 由仓库自带的 Wrapper 8.7 提供，不需要单独安装。
 
 ## 九、更新日志
 
-### v1.5（当前版本，`versionCode 6` / 脚本 v14）
+### v1.6（当前版本，`versionCode 7` / 脚本 v15）
+
+- **修一个会反复黑屏的严重 bug**（4.9）：`in_super_power()` 的兜底用
+  `dumpsys activity activities | grep -q com.miui.superpower`，而 dump 里的
+  `RotationHistory` 小节会长期保留「曾经打开过的 Activity」文本。
+  只要在 App 里进过一次超级省电，这个判断就**永久为真**，
+  规则二每 70 秒误触发一次「退出 + 息屏」——正在刷抖音也会被黑屏（实测连续 34 次，
+  其中 16 次真的把亮着的屏幕关掉）。现在兜底只看 `topResumedActivity` 那一行
+- 息屏前多一道保险：前台是普通 App（抖音/浏览器）时只记
+  `user is in an app -> keep screen on`，不再补发 SLEEP
+- 真在超级省电时功能不变：实测 `16:22:45 -> leave` / `16:22:48 screen off done`
+- 日志文案 `-> leave + screen off` 改为 `-> leave`（息屏可能被上面那道保险跳过）
+- README 新增 4.9（完整复盘 + 判据对照表），5.7 增第 10 条
+
+### v1.5（`versionCode 6` / 脚本 v14）
 
 - **新增：充电中电量 > 77% 自动退出超级省电 + 立刻息屏**（4.8）。
   条件是「正在充电 + 仍处于超级省电 + 电量严格大于 77%」，充电期间每 30 秒复查；

@@ -3,7 +3,7 @@
 #  ExtremePowerSaver · 守护进程
 #
 #  功能一 · 插电自动退出超级省电
-#           + 充电中处于超级省电且电量 > 77% → 退出超级省电并立刻息屏
+#           + 充电中处于超级省电且电量 > 77% → 退出超级省电（没在用手机时顺带息屏）
 #  功能二 · 闲置息屏：连续 N 秒没有任何触屏 → 回桌面 + 息屏
 #           （超级省电模式下不生效，由本脚本主动跳过）
 #
@@ -29,7 +29,7 @@
 export PATH=/system/bin:/system/xbin:/sbin:/data/adb/magisk:$PATH
 
 # 脚本版本：App 侧会比对，不一致就自动重装覆盖（否则老脚本永远不升级）
-EPS_SCRIPT_VERSION=14
+EPS_SCRIPT_VERSION=15
 
 PIDFILE=/data/local/tmp/eps_charge_watch.pid
 IDLEPIDFILE=/data/local/tmp/eps_charge_watch.idle.pid
@@ -182,8 +182,42 @@ leave_super_power() {
 in_super_power() {
     v=$(/system/bin/settings get system POWER_SAVE_MODE_OPEN 2>/dev/null)
     [ "$v" = "1" ] && return 0
-    dumpsys activity activities 2>/dev/null | grep -q "com.miui.superpower" && return 0
+    # 兜底只认「真正处于前台的超级省电界面」，绝不能再 grep 整个 dumpsys。
+    #
+    # 踩过的坑：`dumpsys activity activities` 里有个 RotationHistory 小节，
+    # 会把**曾经**打开过的 ActivityRecord 连同包名一起留在文本里：
+    #   source=ActivityRecord{b1e51fb u0 com.miui.securitycenter/
+    #          com.miui.superpower.SuperPowerProgressActivity} t11433}
+    # 只要用户在 App 里进过一次超级省电（会短暂出现 SuperPowerProgressActivity），
+    # 这行就永久留在 dump 里。之后 POWER_SAVE_MODE_OPEN 明明是 0，
+    # grep 整个输出也照样命中 —— 函数恒为 true。
+    # 后果：规则二每 70 秒误触发一次「退出超级省电 + 息屏」，正在刷视频也会被黑屏。
+    #
+    # 现在只看 topResumedActivity 那一行：
+    #   真在省电 → com.miui.securityadd/com.miui.superpower.SuperPowerLauncherActivity
+    #   已退出   → com.miui.home/.launcher.Launcher
+    # 也就不会再被历史文本骗到。
+    /system/bin/dumpsys activity activities 2>/dev/null \
+        | grep -m1 'topResumedActivity' \
+        | grep -qE 'com\.miui\.superpower|com\.miui\.securityadd'
+    if [ $? -eq 0 ]; then
+        return 0
+    fi
     return 1
+}
+
+# 前台是不是「用户自己的普通 App」（不是桌面、不是超级省电界面）。
+# 用途：执行规则二时如果用户正开着抖音/浏览器，就别再补一发 SLEEP 把他屏幕关掉。
+# 判定不了（息屏、字段缺失）一律当作「不在用」，保持原有行为。
+user_in_app() {
+    _f=$(/system/bin/dumpsys activity activities 2>/dev/null | grep -m1 'topResumedActivity')
+    case "$_f" in
+        *com.miui.home*|*com.miui.superpower*|*com.miui.securityadd*) return 1 ;;
+        *com.example.extremepowersaver*) return 1 ;;
+        # 只有确实解析出 "包名/类名" 才算用户真的开着某个 App
+        */*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # 当前电量（0~100）。结果写进 BATT_PCT；返回 1 = 一个节点都读不到。
@@ -219,12 +253,19 @@ battery_pct() {
 # 又进了超级省电（从系统设置手动进、或者插着电时用 App 进），
 # 只要电量涨过 77%，就没必要继续省电了——直接退出，并把还亮着的屏幕关掉。
 leave_when_battery_high() {
-    log "charging + super power + battery ${BATT_PCT}% > ${EXIT_BATTERY_PCT}% -> leave + screen off"
+    log "charging + super power + battery ${BATT_PCT}% > ${EXIT_BATTERY_PCT}% -> leave"
     leave_super_power
     # 等 MIUI 把超级省电的桌面切回普通桌面：这期间发 SLEEP 会被转场吞掉，
     # 表现成「发了息屏键但屏幕还亮着」。
     sleep 1.5
-    screen_off_now
+    # 第二道保险：用户正开着普通 App（刷抖音、看网页）就不补息屏。
+    # 正常路径下这里前台是桌面（刚退出省电），会照常息屏；
+    # 万一判定再出偏差，也不会把正在看的屏幕黑掉。
+    if user_in_app; then
+        log "user is in an app -> keep screen on"
+    else
+        screen_off_now
+    fi
     # 给系统一点时间落地，避免紧接着的复查读到退出前的旧状态
     sleep 8
 }
