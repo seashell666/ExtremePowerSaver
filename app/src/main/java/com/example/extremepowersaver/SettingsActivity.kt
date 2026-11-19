@@ -25,6 +25,7 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var cbToast: CheckBox
     private lateinit var cbAutoExit: CheckBox
     private lateinit var cbIdle: CheckBox
+    private lateinit var cbReset: CheckBox
     private lateinit var tvWatchStatus: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -36,6 +37,7 @@ class SettingsActivity : AppCompatActivity() {
         cbToast = findViewById(R.id.cbToast)
         cbAutoExit = findViewById(R.id.cbAutoExit)
         cbIdle = findViewById(R.id.cbIdle)
+        cbReset = findViewById(R.id.cbReset)
         tvWatchStatus = findViewById(R.id.tvWatchStatus)
 
         editCommand.setText(Prefs.command(this))
@@ -44,12 +46,17 @@ class SettingsActivity : AppCompatActivity() {
         // 先设初始状态再挂监听，避免恢复状态时误触发安装
         cbAutoExit.isChecked = Prefs.autoExitOnCharge(this)
         cbIdle.isChecked = Prefs.idleScreenOff(this)
+        cbReset.isChecked = Prefs.resetHomeOnScreenOff(this)
         cbAutoExit.setOnCheckedChangeListener { _, checked ->
             Prefs.setAutoExitOnCharge(this, checked)
             applyWatch()
         }
         cbIdle.setOnCheckedChangeListener { _, checked ->
             Prefs.setIdleScreenOff(this, checked)
+            applyWatch()
+        }
+        cbReset.setOnCheckedChangeListener { _, checked ->
+            Prefs.setResetHomeOnScreenOff(this, checked)
             applyWatch()
         }
         refreshWatchStatus()
@@ -72,13 +79,14 @@ class SettingsActivity : AppCompatActivity() {
     private var updatingUi = false
 
     /**
-     * 两个守护开关共用同一个脚本，所以统一走一次 sync：
+     * 三个守护开关共用同一个脚本，所以统一走一次 sync：
      * 只要还有任意一个开着就安装/重启，全关才移除脚本。
      */
     private fun applyWatch() {
         if (updatingUi) return
         cbAutoExit.isEnabled = false
         cbIdle.isEnabled = false
+        cbReset.isEnabled = false
         tvWatchStatus.text = "正在应用设置…"
 
         executor.execute {
@@ -86,6 +94,7 @@ class SettingsActivity : AppCompatActivity() {
             main.post {
                 cbAutoExit.isEnabled = true
                 cbIdle.isEnabled = true
+                cbReset.isEnabled = true
                 if (!ok) Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                 refreshWatchStatus()
             }

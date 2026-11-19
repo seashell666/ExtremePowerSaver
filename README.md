@@ -10,6 +10,7 @@
 <p>
   <img src="docs/home.png" width="230" alt="打开即进入超级省电">
   <img src="docs/settings.png" width="230" alt="命令设置页">
+  <img src="docs/settings2.png" width="230" alt="自动化开关：充电退出 / 闲置息屏 / 息屏归位主屏">
 </p>
 
 ## 外观
@@ -29,6 +30,8 @@
   电量一超过 77% 就自动退出超级省电；此时没在用手机（前台是桌面）才顺带息屏。
 - **闲置息屏**：连续 7 分 27 秒（447 秒）没有任何触屏，自动退回桌面默认主页面并息屏。
   只认真实触屏（不看按键、传感器），**超级省电模式下不生效**。
+- **息屏归位主屏**：在桌面但不在第一页的时候息屏，7 秒后桌面自己翻回主页面，
+  **全程屏幕不亮**；7 秒内又亮屏则保持原样。见第六章。
 - **命令可改**：默认内置「进入 / 退出」两条命令，也可以换成任意 root 命令。
 
 ## 环境要求
@@ -414,7 +417,7 @@ timeout 447 dd if=/dev/input/event4 bs=24 count=1 of=/dev/null
 
 ### 5.6 和充电退出怎么共存
 
-两个功能共用同一个守护脚本，开关状态由 App 写在：
+三个功能共用同一个守护脚本，开关状态由 App 写在：
 
 ```
 /data/local/tmp/eps_charge_watch.cfg
@@ -422,9 +425,11 @@ charge=1
 idle=1
 idle_timeout=447
 exit_battery_pct=77
+reset_home=1
+reset_delay=7
 ```
 
-脚本启动时读一次。任一功能开启就保留脚本，两个都关才删脚本和进程。
+脚本启动时读一次。任一功能开启就保留脚本，全关才删脚本和进程。
 App 每次启动会比对配置文件与开关状态，不一致就重装纠正（防止手工改过或旧版本残留）。
 
 ### 5.7 几个必须知道的实现细节
@@ -473,7 +478,93 @@ App 每次启动会比对配置文件与开关状态，不一致就重装纠正�
    v1.5 因此每 70 秒把正在用的屏幕关掉一次（详见 4.9）。
    要判断当前状态就只取 `topResumedActivity` / `mCurrentFocus` 那一行，或者直接读设置键。
 
-## 六、编译
+## 六、息屏归位主屏：在桌面非首页息屏，7 秒后自己回到主屏
+
+### 6.1 需求
+
+在桌面、但不在第一页（往左滑过几页、或者正开着文件夹/抽屉）的时候按下电源键息屏，
+7 秒之后桌面自己翻回第一页——**屏幕全程是黑的**，不会亮一下；
+7 秒内又亮屏，就保持原来那一页不动（那说明只是看一眼）。
+
+### 6.2 为什么不能用 HOME 键（三个方向都试过）
+
+| 尝试 | 结果 |
+|---|---|
+| 息屏状态下 `input keyevent 3` | 完全无效，亮屏后仍在第二页 |
+| 息屏状态下 `am start` 桌面（普通启动） | 无效，系统只回一句 `intent has been delivered to currently running top-most instance` |
+| 唤醒 → 立刻 HOME → 立刻息屏 | 桌面还没 resumed，HOME 照样被丢；而且要等桌面真的接手，亮屏窗口至少 0.9 秒（实测 490ms 时依然失败），夜里能看到明显闪光 |
+
+原因在 `dumpsys window` / `dumpsys input` 里写得很清楚（息屏状态下）：
+
+```
+mCurrentFocus=null
+FocusedWindows: <none>
+mFocusedApp=ActivityRecord{... com.miui.home/.launcher.Launcher}
+isSleeping=true
+```
+
+焦点窗口是 `null`，InputDispatcher 没有任何投递目标，按键直接被丢弃——这不是脚本的问题，
+是系统在息屏状态下就不接受键鼠注入。
+
+顺带发现：`mFocusedApp` **仍然保留着「灭屏前最后拿到焦点的是谁」**，
+正好可以用来判断「息屏前是不是在桌面」。
+
+### 6.3 真正可行的办法：让桌面 Activity 重建一次
+
+MIUI 桌面在 manifest 里声明了 `stateNotNeeded`，**Activity 重建后不恢复页面状态，直接落在默认页**；
+而进程不重启，图标缓存、小组件、壁纸都还在。于是：
+
+```bash
+am start -n com.miui.home/.launcher.Launcher -f 0x10008000   # NEW_TASK | CLEAR_TASK
+```
+
+实测（真机）：屏幕上什么都没发生（本来就是黑的），桌面进程 pid 不变（15510 → 15510），
+亮屏后直接就是第一页，两张卡片组件、图标一个不少，没有白屏/重载。
+
+> 组件名不写死：动作发生时用 `cmd package resolve-activity --brief -a android.intent.action.MAIN
+> -c android.intent.category.HOME` 问系统要，换桌面也能用。
+
+### 6.4 怎么知道「屏幕黑了」
+
+背光节点 `/sys/class/backlight/panel0-backlight/brightness`：`0` = 灭（AOD 也是 0），非 0 = 亮。
+sysfs 不支持 inotify，只能轮询，所以按状态分频：
+
+| 状态 | 轮询间隔 | 说明 |
+|---|---|---|
+| 亮屏 | 1 秒 | 屏幕本来就费电，这点开销可忽略；保证 1 秒内发现息屏 |
+| 息屏（已处理完） | 4 秒 | 只为等下一次亮屏，越省越好 |
+| 息屏后倒计时 | 200 毫秒 | 保证「7 秒内亮屏一定取消」，不会在你亮屏那一瞬间把页面翻走 |
+
+每次轮询只是一个 shell 内建 `read`，不 fork 进程；倒计时里每 200ms 取一次 `date +%s%3N` 算毫秒。
+所以从按下电源键到页面归位是 **7~8 秒**（含最多 1 秒的发现延迟），不是精确的 7.000 秒。
+
+### 6.5 不会误伤的场景
+
+- **前台不是桌面**：息屏瞬间读 `dumpsys window | grep -m1 mFocusedApp`，不是桌面包名就整段跳过。
+  刷抖音、看网页时息屏不会把 App 顶掉。
+- **超级省电桌面**：`com.miui.securityadd` / `com.miui.superpower` 同样跳过。
+- **闲置息屏自己刚归位过**：`go_home_and_sleep()` 已经按过两次 HOME，它会写一个
+  `eps_charge_watch.reset.skip` 时间戳，20 秒内不再重复重建。
+- **7 秒内亮屏**：倒计时每 200ms 查一次背光，一亮就放弃。
+
+### 6.6 怎么验证 / 排障
+
+```bash
+adb shell su -c 'tail -f /data/local/tmp/eps_charge_watch.log'
+```
+
+```
+17:03:31 screen off 7s -> launcher back to main page          # 归位成功
+17:59:05 screen off, not launcher -> no reset                 # 前台是普通 App，跳过
+18:01:12 screen back on within 7s -> keep page                # 7 秒内亮屏，取消
+18:05:40 screen off right after idle sleep -> already on main page
+18:09:02 screen off, super power launcher -> no reset
+```
+
+想自己验一次：把桌面滑到第二页 → 按电源键息屏 → 等 10 秒 → 亮屏，应该直接在第一页。
+若想确认「7 秒内亮屏不归位」：滑到第二页 → 息屏 → 3 秒后亮屏，应该还在第二页。
+
+## 七、编译
 
 需要 JDK 17 + Android SDK（platform 34）。仓库自带 Gradle Wrapper（8.7）。
 
@@ -492,18 +583,18 @@ echo "sdk.dir=/path/to/Android/sdk" > local.properties
 本机实测可用环境：JDK 17 + Android SDK platform-34（build-tools 34.0.0），
 Gradle 由仓库自带的 Wrapper 8.7 提供，不需要单独安装。
 
-## 七、代码结构
+## 八、代码结构
 
 | 文件 | 作用 |
 |---|---|
 | `MainActivity.kt` | 打开即执行，检查 root → 执行命令 → 结果提示 → 退出；含"充电中电量已过 77% 就不进入"守卫 |
 | `RootShell.kt` | su 探测与 `su -c` 执行封装（多路径探测 + 超时 + 被中断容错） |
 | `ChargeWatch.kt` | 充电守护进程的安装/启停/状态查询（写 service.d、拉起、校验 pid 身份） |
-| `SettingsActivity.kt` | 命令编辑、预设（进入/退出）、立即测试、充电自动退出开关与状态 |
+| `SettingsActivity.kt` | 命令编辑、预设（进入/退出）、立即测试、三个自动化开关与守护状态 |
 | `Prefs.kt` | 命令与开关的本地存储 |
-| `assets/eps_charge_watch.sh` | 守护脚本本体（开机自启 + 脱壳 + sysfs 轮询 + 调 provider 退出 + 满 77% 退出；v15 起判定只看前台） |
+| `assets/eps_charge_watch.sh` | 守护脚本本体（开机自启 + 脱壳 + sysfs 轮询 + 调 provider 退出 + 满 77% 退出 + 闲置息屏 + 息屏归位；v15 起省电判定只看前台，v16 起增加归位监视） |
 
-## 八、已知问题与注意事项
+## 九、已知问题与注意事项
 
 - **首次运行必须在 Magisk 弹窗点「允许」**，否则 `su -c id` 返回 `Permission denied`，
   App 会提示"未获得 root 权限"。可通过 logcat 过滤 `EPS` 标签排查。
@@ -521,9 +612,27 @@ Gradle 由仓库自带的 Wrapper 8.7 提供，不需要单独安装。
 - 换 MIUI / HyperOS 版本后，若 `content call` 报 `IllegalArgumentException` 或无效，
   说明 provider 的 method 或 key 变了，需要重新反编译确认。
 
-## 九、更新日志
+## 十、更新日志
 
-### v1.6（当前版本，`versionCode 7` / 脚本 v15）
+### v1.7（当前版本，`versionCode 8` / 脚本 v16）
+
+- **新增「息屏归位主屏」**（第六章）：在桌面但不在第一页时息屏，7 秒后桌面自己翻回主页面，
+  **全程不点亮屏幕**；7 秒内重新亮屏则保持原样
+- 关键结论：息屏状态下 `mCurrentFocus=null`、`FocusedWindows: <none>`、桌面任务 `isSleeping=true`，
+  注入的 HOME 键会被 InputDispatcher 直接丢弃——所以「黑屏按 HOME」这条路根本走不通
+  （实测连「唤醒 0.25 秒后补一发 HOME」也失败，且亮屏窗口有 490ms，夜里能看见闪）
+- 改用 `am start -f 0x10008000`（NEW_TASK | CLEAR_TASK）让桌面 Activity 重建：
+  桌面声明了 `stateNotNeeded`，重建后落回默认页，进程 pid 不变、小组件不丢、不闪白
+- 判断「息屏前在不在桌面」用 `mFocusedApp`（息屏后 `topResumedActivity` 立刻变空，只有它还留着）；
+  前台是普通 App 或超级省电桌面时整段跳过
+- 背光节点轮询分频：亮屏 1 秒 / 息屏 4 秒 / 倒计时 200 毫秒，每次只是一个内建 `read`，不 fork
+- 新增 cfg 键 `reset_home=` / `reset_delay=`，设置页新增第四张卡片与勾选框
+- 子进程清理从「只记 idle」改成通用的 `kill_stale_child`，`ChargeWatch.stop()` 现在同时强杀
+  idle 和 reset 两个子进程（否则息屏归位子进程可能正卡在 7 秒倒计时里，停不干净）
+- 文档新增第六章（需求 / 三次失败尝试 / 原理 / 开销 / 日志样例），配图增加到 3 张
+- 另：系统「自动锁屏」需大于 447 秒（建议 10 分钟），否则闲置息屏永远等不到触发
+
+### v1.6（`versionCode 7` / 脚本 v15）
 
 - **修一个会反复黑屏的严重 bug**（4.9）：`in_super_power()` 的兜底用
   `dumpsys activity activities | grep -q com.miui.superpower`，而 dump 里的
@@ -570,7 +679,7 @@ Gradle 由仓库自带的 Wrapper 8.7 提供，不需要单独安装。
   图标改为喜庆红底 + 金色闪电，全界面铺满红底
 - v1.3：新增「闲置息屏」，用 evdev 阻塞读监控真实触屏
 
-## 十、参考
+## 十一、参考
 
 最初思路来自社区里的一个 Vector / Xposed 模块（通过注入 `system_server` 监听电量来写设置键）。
 该项目改为**普通 APK + root + 直接调用 PowerSaverProvider**，

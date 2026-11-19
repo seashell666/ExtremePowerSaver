@@ -6,6 +6,8 @@
 #           + 充电中处于超级省电且电量 > 77% → 退出超级省电（没在用手机时顺带息屏）
 #  功能二 · 闲置息屏：连续 N 秒没有任何触屏 → 回桌面 + 息屏
 #           （超级省电模式下不生效，由本脚本主动跳过）
+#  功能三 · 息屏归位主屏：在桌面但不在第一页时息屏，N 秒后把桌面翻回主页面，
+#           全程屏幕保持黑屏；N 秒内重新亮屏则保持原样
 #
 #  由 App 安装到 /data/adb/service.d/ ，开机由 Magisk 以 root 启动
 #  也可被 App 立即手动拉起
@@ -29,18 +31,25 @@
 export PATH=/system/bin:/system/xbin:/sbin:/data/adb/magisk:$PATH
 
 # 脚本版本：App 侧会比对，不一致就自动重装覆盖（否则老脚本永远不升级）
-EPS_SCRIPT_VERSION=15
+EPS_SCRIPT_VERSION=16
 
 PIDFILE=/data/local/tmp/eps_charge_watch.pid
 IDLEPIDFILE=/data/local/tmp/eps_charge_watch.idle.pid
+RESETPIDFILE=/data/local/tmp/eps_charge_watch.reset.pid
+SKIPFILE=/data/local/tmp/eps_charge_watch.reset.skip
 LOG=/data/local/tmp/eps_charge_watch.log
 CFG=/data/local/tmp/eps_charge_watch.cfg
 URI=content://com.miui.powercenter.powersaver
 
-# ---- 默认值：两个功能都开（App 会写 cfg 覆盖）----
+# ---- 默认值：三个功能都开（App 会写 cfg 覆盖）----
 ENABLE_CHARGE=1
 ENABLE_IDLE=1
+ENABLE_RESET=1
 IDLE_TIMEOUT=447
+
+# 息屏后多少秒把桌面翻回主页面。7 秒是用户定的：
+# 息屏后 7 秒内又亮屏，说明只是看一眼，保持原来的页面不动。
+RESET_DELAY=7
 
 # 充电中「电量大到没必要再省电」的门槛，单位百分比。
 # 大于这个值（严格大于）才自动退出超级省电，77 → 78% 起才会动手。
@@ -61,6 +70,13 @@ if [ -r "$CFG" ]; then
     # 卡在 1~99：写成 0 会「只要充电就退」，写成 100 等于功能失效
     if [ -n "$v" ] && [ "$v" -ge 1 ] 2>/dev/null && [ "$v" -le 99 ] 2>/dev/null; then
         EXIT_BATTERY_PCT=$v
+    fi
+    v=$(sed -n 's/^reset_home=//p' "$CFG" 2>/dev/null | head -n1)
+    [ -n "$v" ] && ENABLE_RESET=$v
+    v=$(sed -n 's/^reset_delay=//p' "$CFG" 2>/dev/null | head -n1)
+    # 下限 2 秒：写成 0/1 会在你还没放下手机时就把页面翻走
+    if [ -n "$v" ] && [ "$v" -ge 2 ] 2>/dev/null && [ "$v" -le 60 ] 2>/dev/null; then
+        RESET_DELAY=$v
     fi
 fi
 
@@ -89,28 +105,30 @@ fi
 echo $$ > "$PIDFILE"
 
 IDLE_PID=""
+RESET_PID=""
 
-# 清掉上一条命留下的 idle 子进程。
+# 清掉上一条命留下的子进程（idle / reset 共用）。
 #
-# 为什么必须单独记它的 pid：idle 子进程常年阻塞在 `timeout 447 dd` 里，
+# 为什么必须单独记它们的 pid：idle 子进程常年阻塞在 `timeout 447 dd` 里，
 # 而 mksh 的 trap 要等当前前台命令结束才执行——给主进程发 TERM 时，
 # 主进程 2 秒内就退了，子进程却会一直卡在这个 dd 上，最长要等满 447 秒
 # 才看到 TERM。这期间它仍然有能力执行「回桌面+息屏」，
 # 表现就是「已经关掉了/换过配置，还会莫名其妙黑屏」。
 # 所以：子进程 pid 单独落盘，清理时一律 kill -9（SIGKILL 无法被延迟）。
-kill_stale_idle() {
-    [ -f "$IDLEPIDFILE" ] || return 0
+kill_stale_child() {
+    [ -f "$1" ] || return 0
     old=""
-    read old < "$IDLEPIDFILE" 2>/dev/null
+    read old < "$1" 2>/dev/null
     if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
         if tr '\0' ' ' < "/proc/$old/cmdline" 2>/dev/null | grep -q eps_charge_watch; then
             kill -9 "$old" 2>/dev/null
-            log "killed stale idle watcher (pid $old)"
+            log "killed stale $2 watcher (pid $old)"
         fi
     fi
-    rm -f "$IDLEPIDFILE"
+    rm -f "$1"
 }
-kill_stale_idle
+kill_stale_child "$IDLEPIDFILE" idle
+kill_stale_child "$RESETPIDFILE" reset
 
 # 只监听真实终止信号，不要用 EXIT。
 # 原因：命令替换 $(date ...) / $(settings get ...) 会 fork 子 shell，
@@ -119,7 +137,8 @@ kill_stale_idle
 cleanup() {
     log "daemon terminating (pid $$)"
     [ -n "$IDLE_PID" ] && kill -9 "$IDLE_PID" 2>/dev/null
-    rm -f "$IDLEPIDFILE"
+    [ -n "$RESET_PID" ] && kill -9 "$RESET_PID" 2>/dev/null
+    rm -f "$IDLEPIDFILE" "$RESETPIDFILE"
     exit 0
 }
 trap cleanup TERM INT HUP
@@ -400,6 +419,9 @@ go_home_and_sleep() {
     sleep 0.28
     touch_seen && { log "abort: touch during action"; return 1; }
 
+    # 告诉「息屏归位」监视器：这次黑屏是主动归位过的，别再翻一次
+    date +%s > "$SKIPFILE"
+
     # ④ 息屏，并确认真的黑掉了（SLEEP 键偶尔会被系统吞掉，
     #    不确认的话下一轮超时又会再发一次，表现成反复黑屏）
     if screen_is_on; then
@@ -495,6 +517,159 @@ idle_watch() {
     done
 }
 
+# ---- 功能三：息屏后归位主屏 ----
+#
+# 需求：在桌面、但不在第一页的时候息屏，N 秒后桌面自己翻回主页面；
+# 全程屏幕保持黑屏，下次亮屏看到的就是主页面。N 秒内又亮屏则原样不动。
+#
+# 为什么不能用 HOME 键（实测结论）：
+#   息屏后 WindowManager 的焦点窗口是 <none>、桌面任务 isSleeping=true，
+#   InputDispatcher 会把注入的按键直接丢掉——`input keyevent 3` 发多少次，
+#   亮屏后都还停在原来那一页。刚亮屏就发也不行（桌面还没 resumed）。
+#
+# 能用的办法是让桌面 Activity 走一次 CLEAR_TASK 重建：MIUI 桌面声明了
+# stateNotNeeded，重建后自己回到默认页，而**进程不重启**（pid 不变、
+# 图标缓存不丢、不闪白），亮屏时看不出任何痕迹。
+#
+# 代价是必须知道「屏幕什么时候黑的」：背光节点不支持 inotify，只能低频轮询。
+#   亮屏时 1 秒一次；息屏后 4 秒一次；息屏后的倒计时用 200ms 粒度，
+#   保证「7 秒内亮屏一定取消」。每次轮询只是一个内建 read，不 fork 进程。
+
+# 背光节点：0 = 灭（AOD 也是 0），非 0 = 亮
+find_backlight() {
+    for f in \
+        /sys/class/backlight/panel0-backlight/brightness \
+        /sys/class/backlight/*/brightness \
+        /sys/class/leds/lcd-backlight/brightness
+    do
+        [ -r "$f" ] || continue
+        echo "$f"
+        return 0
+    done
+    return 1
+}
+
+backlight_on() {
+    BL_ON=0
+    _bv=""
+    read -r _bv < "$BL_DEV" 2>/dev/null
+    case "$_bv" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    [ "$_bv" -gt 0 ] && BL_ON=1
+    return 0
+}
+
+# 让桌面重建一次，落回默认主页面。
+# 0x10008000 = FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK
+reset_launcher_page() {
+    _comp=$(/system/bin/cmd package resolve-activity --brief \
+        -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null | tail -n1)
+    case "$_comp" in
+        */*) ;;
+        *) _comp="com.miui.home/.launcher.Launcher" ;;
+    esac
+    /system/bin/am start -n "$_comp" -f 0x10008000 >/dev/null 2>&1
+}
+
+# 刚息屏时调用一次：判断前景是不是桌面，是就开始倒计时
+handle_screen_off() {
+    # 息屏后 topResumedActivity 会立刻变空，只有 mFocusedApp 还留着
+    # 「灭屏前最后拿到焦点的是谁」，所以只能看这个字段。
+    _fl=$(/system/bin/dumpsys window 2>/dev/null | grep -m1 mFocusedApp)
+    case "$_fl" in
+        *com.miui.superpower*|*com.miui.securityadd*)
+            log "screen off, super power launcher -> no reset"
+            return
+            ;;
+    esac
+
+    _home=$(home_pkg)
+    [ -z "$_home" ] && _home=com.miui.home
+    case "$_fl" in
+        *"$_home"*) ;;
+        *)
+            log "screen off, not launcher -> no reset"
+            return
+            ;;
+    esac
+
+    # 闲置息屏刚刚自己归位过（已经按过两次 HOME），不用再重建一次
+    if [ -f "$SKIPFILE" ]; then
+        _st=""
+        read _st < "$SKIPFILE" 2>/dev/null
+        case "$_st" in
+            ''|*[!0-9]*) ;;
+            *)
+                _now=$(date +%s)
+                if [ $((_now - _st)) -le 20 ]; then
+                    log "screen off right after idle sleep -> already on main page"
+                    return
+                fi
+                ;;
+        esac
+    fi
+
+    # 倒计时：期间只要背光重新亮起就整段放弃
+    _t0=$(date +%s%3N)
+    case "$_t0" in
+        ''|*[!0-9]*) _t0="" ;;   # date 不支持毫秒时退回按次数计
+    esac
+    _n=0
+    while true; do
+        sleep 0.2
+        backlight_on
+        if [ "$BL_ON" = "1" ]; then
+            log "screen back on within ${RESET_DELAY}s -> keep page"
+            return
+        fi
+        _n=$((_n + 1))
+        if [ -n "$_t0" ]; then
+            _now=$(date +%s%3N)
+            [ $((_now - _t0)) -ge $((RESET_DELAY * 1000)) ] && break
+        else
+            [ "$_n" -ge $((RESET_DELAY * 4)) ] && break
+        fi
+    done
+
+    reset_launcher_page
+    log "screen off ${RESET_DELAY}s -> launcher back to main page"
+}
+
+screen_watch() {
+    BL_DEV=$(find_backlight)
+    if [ -z "$BL_DEV" ]; then
+        log "reset: no backlight node -> feature disabled"
+        return
+    fi
+    backlight_on
+    was_on=$BL_ON
+    log "reset watcher started (bl=$BL_DEV, delay=${RESET_DELAY}s, screen_on=$was_on)"
+
+    while true; do
+        if ! kill -0 $$ 2>/dev/null; then
+            log "reset: parent (pid $$) gone, exiting"
+            rm -f "$RESETPIDFILE"
+            return
+        fi
+
+        backlight_on
+        if [ "$BL_ON" = "1" ]; then
+            was_on=1
+            sleep 1
+            continue
+        fi
+        if [ "$was_on" = "0" ]; then
+            # 一直是黑的：慢慢等，别为了等亮屏把电耗掉
+            sleep 4
+            continue
+        fi
+        # 由亮转黑：这一轮才需要干活
+        was_on=0
+        handle_screen_off
+    done
+}
+
 # ---- 功能一：充电自动退出 ----
 charge_loop() {
     prev=""
@@ -562,13 +737,13 @@ charge_loop() {
 }
 
 # ---- 启动 ----
-if [ "$ENABLE_CHARGE" != "1" ] && [ "$ENABLE_IDLE" != "1" ]; then
-    log "both features disabled, exiting"
+if [ "$ENABLE_CHARGE" != "1" ] && [ "$ENABLE_IDLE" != "1" ] && [ "$ENABLE_RESET" != "1" ]; then
+    log "all features disabled, exiting"
     rm -f "$PIDFILE"
     exit 0
 fi
 
-log "features: charge=$ENABLE_CHARGE idle=$ENABLE_IDLE timeout=${IDLE_TIMEOUT}s exit_pct=${EXIT_BATTERY_PCT}%"
+log "features: charge=$ENABLE_CHARGE idle=$ENABLE_IDLE timeout=${IDLE_TIMEOUT}s exit_pct=${EXIT_BATTERY_PCT}% reset=$ENABLE_RESET/${RESET_DELAY}s"
 
 if [ "$ENABLE_IDLE" = "1" ]; then
     idle_watch &
@@ -576,9 +751,19 @@ if [ "$ENABLE_IDLE" = "1" ]; then
     echo $IDLE_PID > "$IDLEPIDFILE"
 fi
 
+if [ "$ENABLE_RESET" = "1" ]; then
+    screen_watch &
+    RESET_PID=$!
+    echo $RESET_PID > "$RESETPIDFILE"
+fi
+
 if [ "$ENABLE_CHARGE" = "1" ]; then
     charge_loop
 else
-    # 只开闲置息屏：主进程不空转，直接等子进程
-    [ -n "$IDLE_PID" ] && wait "$IDLE_PID"
+    # 不跑充电循环：主进程不空转，直接等子进程
+    if [ -n "$IDLE_PID" ]; then
+        wait "$IDLE_PID"
+    else
+        wait "$RESET_PID"
+    fi
 fi

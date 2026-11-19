@@ -297,6 +297,65 @@
                 app:buttonTint="@color/festive_red" />
         </LinearLayout>
 
+        <!-- 卡片四：息屏归位主屏 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_card"
+            android:elevation="6dp"
+            android:orientation="vertical"
+            android:padding="18dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="息屏归位主屏"
+                    android:textColor="@color/text_dark"
+                    android:textSize="17sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_chip"
+                    android:paddingStart="7dp"
+                    android:paddingTop="2dp"
+                    android:paddingEnd="7dp"
+                    android:paddingBottom="2dp"
+                    android:text="7 秒"
+                    android:textColor="@color/festive_red"
+                    android:textSize="10sp" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:lineSpacingExtra="3dp"
+                android:text="在桌面（但不在第一页）的时候息屏，7 秒后桌面会在黑屏状态下自己翻回主屏幕，下次亮屏看到的就是主屏。全程不会点亮屏幕；7 秒内重新亮屏则保持原样。回到的是桌面第一页，不是别的 App。"
+                android:textColor="@color/text_body"
+                android:textSize="12sp" />
+
+            <CheckBox
+                android:id="@+id/cbReset"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:buttonTint="@color/festive_red"
+                android:text="息屏 7 秒后回到主屏幕"
+                android:textColor="@color/text_dark"
+                android:textSize="13sp"
+                app:buttonTint="@color/festive_red" />
+        </LinearLayout>
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

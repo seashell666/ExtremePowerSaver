@@ -28,7 +28,7 @@ object ChargeWatch {
      * 不一致时 App 会自动覆盖重装并重启守护进程——否则已安装的旧脚本永远不升级，
      * 会出现「APK 更新了但行为还是老样子」的诡异故障。
      */
-    const val SCRIPT_VERSION = "15"
+    const val SCRIPT_VERSION = "16"
 
     private const val PIDFILE = "/data/local/tmp/eps_charge_watch.pid"
 
@@ -40,6 +40,13 @@ object ChargeWatch {
      * 停进程时必须单独对它 kill -9。
      */
     private const val IDLEPIDFILE = "/data/local/tmp/eps_charge_watch.idle.pid"
+
+    /**
+     * 「息屏归位主屏」子进程的 pid，同样要单独记、单独 kill -9。
+     * 它平时在 1~4 秒一轮的背光轮询里，TERM 一般能及时生效，
+     * 但碰上正在 7 秒倒计时的时候会被拖住，所以一并强杀。
+     */
+    private const val RESETPIDFILE = "/data/local/tmp/eps_charge_watch.reset.pid"
 
     private const val LOGFILE = "/data/local/tmp/eps_charge_watch.log"
 
@@ -89,8 +96,10 @@ object ChargeWatch {
     private fun configText(ctx: Context): String {
         val charge = if (Prefs.autoExitOnCharge(ctx)) 1 else 0
         val idle = if (Prefs.idleScreenOff(ctx)) 1 else 0
+        val reset = if (Prefs.resetHomeOnScreenOff(ctx)) 1 else 0
         return "charge=$charge\nidle=$idle\nidle_timeout=${Prefs.IDLE_TIMEOUT_SEC}" +
-            "\nexit_battery_pct=${Prefs.EXIT_BATTERY_PCT}"
+            "\nexit_battery_pct=${Prefs.EXIT_BATTERY_PCT}" +
+            "\nreset_home=$reset\nreset_delay=${Prefs.RESET_HOME_DELAY_SEC}"
     }
 
     /**
@@ -179,16 +188,18 @@ object ChargeWatch {
      */
     fun stop() {
         RootShell.run(
-            // 先 kill -9 闲置子进程：它阻塞在 dd 上，TERM 会被延后到超时那一刻，
-            // 留着它就会出现「已经停了/换了配置，还会莫名黑屏」。
-            "if [ -f $IDLEPIDFILE ]; then c=\$(cat $IDLEPIDFILE 2>/dev/null); " +
-                "if [ -n \"\$c\" ] && kill -0 \$c 2>/dev/null; then kill -9 \$c 2>/dev/null; fi; fi; " +
+            // 先 kill -9 两个子进程：闲置子进程阻塞在 dd 上，TERM 会被延后到超时那一刻；
+            // 息屏归位子进程可能正卡在 7 秒倒计时里。留着它们就会出现
+            // 「已经停了/换了配置，还会莫名黑屏、桌面还会自己翻页」。
+            "for f in $IDLEPIDFILE $RESETPIDFILE; do " +
+                "if [ -f \$f ]; then c=\$(cat \$f 2>/dev/null); " +
+                "if [ -n \"\$c\" ] && kill -0 \$c 2>/dev/null; then kill -9 \$c 2>/dev/null; fi; fi; done; " +
                 "if [ -f $PIDFILE ]; then p=\$(cat $PIDFILE 2>/dev/null); " +
                 "if [ -n \"\$p\" ] && kill -0 \$p 2>/dev/null; then " +
                 "kill \$p 2>/dev/null; " +
                 "i=0; while [ \$i -lt 20 ] && kill -0 \$p 2>/dev/null; do sleep 0.1; i=\$((i+1)); done; " +
                 "kill -9 \$p 2>/dev/null; fi; fi; " +
-                "rm -f $PIDFILE $IDLEPIDFILE; echo __STOPPED__",
+                "rm -f $PIDFILE $IDLEPIDFILE $RESETPIDFILE; echo __STOPPED__",
             40
         )
     }

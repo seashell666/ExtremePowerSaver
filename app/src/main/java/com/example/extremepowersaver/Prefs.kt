@@ -11,9 +11,18 @@ object Prefs {
     private const val KEY_SHOW_TOAST = "show_toast"
     private const val KEY_AUTO_EXIT_ON_CHARGE = "auto_exit_on_charge"
     private const val KEY_IDLE_SCREEN_OFF = "idle_screen_off"
+    private const val KEY_RESET_HOME = "reset_home_on_screen_off"
 
     /** 闲置多久判定为「没人在用」，单位秒。447 = 7 分 27 秒。改这里就能调整时长。 */
     const val IDLE_TIMEOUT_SEC = 447
+
+    /**
+     * 息屏后多久把桌面翻回主页面，单位秒。
+     *
+     * 7 秒：息屏后 7 秒内又亮屏，说明只是看一眼，保持原页面不动；
+     * 超过 7 秒，就在黑屏状态下把桌面重建回第一页，下次亮屏直接看到主屏。
+     */
+    const val RESET_HOME_DELAY_SEC = 7
 
     /**
      * 充电中「电量大到没必要再省电」的门槛，单位百分比。
@@ -88,7 +97,23 @@ object Prefs {
             .edit().putBoolean(KEY_IDLE_SCREEN_OFF, v).apply()
     }
 
+    /**
+     * 是否启用「息屏归位主屏」：在桌面但不在第一页时息屏，
+     * [RESET_HOME_DELAY_SEC] 秒后桌面自己翻回主页面（屏幕全程不亮）。
+     *
+     * 默认 true —— 纯属「下次亮屏更顺手」，没有任何打扰：
+     * 全程黑屏完成，7 秒内亮屏还会自动取消。
+     */
+    fun resetHomeOnScreenOff(ctx: Context): Boolean =
+        ctx.getSharedPreferences(SP, Context.MODE_PRIVATE)
+            .getBoolean(KEY_RESET_HOME, true)
+
+    fun setResetHomeOnScreenOff(ctx: Context, v: Boolean) {
+        ctx.getSharedPreferences(SP, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_RESET_HOME, v).apply()
+    }
+
     /** 是否有任意一个守护功能处于开启状态（决定脚本要不要装）。 */
     fun anyWatchEnabled(ctx: Context): Boolean =
-        autoExitOnCharge(ctx) || idleScreenOff(ctx)
+        autoExitOnCharge(ctx) || idleScreenOff(ctx) || resetHomeOnScreenOff(ctx)
 }
