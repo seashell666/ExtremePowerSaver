@@ -28,7 +28,7 @@ object ChargeWatch {
      * 不一致时 App 会自动覆盖重装并重启守护进程——否则已安装的旧脚本永远不升级，
      * 会出现「APK 更新了但行为还是老样子」的诡异故障。
      */
-    const val SCRIPT_VERSION = "16"
+    const val SCRIPT_VERSION = "17"
 
     private const val PIDFILE = "/data/local/tmp/eps_charge_watch.pid"
 
@@ -49,6 +49,15 @@ object ChargeWatch {
     private const val RESETPIDFILE = "/data/local/tmp/eps_charge_watch.reset.pid"
 
     private const val LOGFILE = "/data/local/tmp/eps_charge_watch.log"
+
+    /**
+     * 「静默翻页」期间压背光的开关文件。
+     *
+     * 脚本里有个忙等循环：只要这个文件存在，就一直把背光写成 0。
+     * 它比 watcher 活得久——watcher 被 kill 时来不及收尾也没关系，
+     * 停进程时先删掉它，循环下一轮就会自己退出，不会把屏幕按黑。
+     */
+    private const val HOLDFILE = "/data/local/tmp/eps_charge_watch.hold"
 
     /**
      * 开关状态通过这个配置文件下发给守护脚本。
@@ -97,9 +106,11 @@ object ChargeWatch {
         val charge = if (Prefs.autoExitOnCharge(ctx)) 1 else 0
         val idle = if (Prefs.idleScreenOff(ctx)) 1 else 0
         val reset = if (Prefs.resetHomeOnScreenOff(ctx)) 1 else 0
+        val silent = if (Prefs.resetSilent(ctx)) 1 else 0
         return "charge=$charge\nidle=$idle\nidle_timeout=${Prefs.IDLE_TIMEOUT_SEC}" +
             "\nexit_battery_pct=${Prefs.EXIT_BATTERY_PCT}" +
-            "\nreset_home=$reset\nreset_delay=${Prefs.RESET_HOME_DELAY_SEC}"
+            "\nreset_home=$reset\nreset_delay=${Prefs.RESET_HOME_DELAY_SEC}" +
+            "\nreset_silent=$silent"
     }
 
     /**
@@ -188,7 +199,10 @@ object ChargeWatch {
      */
     fun stop() {
         RootShell.run(
-            // 先 kill -9 两个子进程：闲置子进程阻塞在 dd 上，TERM 会被延后到超时那一刻；
+            // 先删背光压制开关：那个忙等循环只要文件还在就会一直把亮度写 0，
+            // 进程杀了它也不停，会把屏幕按成黑的。
+            "rm -f $HOLDFILE; " +
+                // 再 kill -9 两个子进程：闲置子进程阻塞在 dd 上，TERM 会被延后到超时那一刻；
             // 息屏归位子进程可能正卡在 7 秒倒计时里。留着它们就会出现
             // 「已经停了/换了配置，还会莫名黑屏、桌面还会自己翻页」。
             "for f in $IDLEPIDFILE $RESETPIDFILE; do " +
@@ -272,6 +286,22 @@ object ChargeWatch {
                     Log.i(TAG, "daemon healthy, pid=${st.pid} ver=${st.version}")
                 }
             }
+        }
+
+        // 装完再复查一次。install() 偶发「脚本写进去了、进程没起来」，
+        // 尤其刚授权 root、Magisk 还在初始化的时候。那时设置页看着一切正常，
+        // 实际什么都不会发生，用户只能靠「再打开一次 App」碰运气——
+        // 这正是另一台同型号机器上「装完不生效」的表现。
+        val after = status()
+        if (!after.running) {
+            Log.w(TAG, "still not running after sync (installed=${after.installed} ver=${after.version}), retry")
+            try {
+                Thread.sleep(600)
+            } catch (e: InterruptedException) {
+                return
+            }
+            val (ok, msg) = install(ctx)
+            Log.w(TAG, "retry install => $ok / $msg")
         }
     }
 }

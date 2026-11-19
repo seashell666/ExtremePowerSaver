@@ -12,6 +12,7 @@ object Prefs {
     private const val KEY_AUTO_EXIT_ON_CHARGE = "auto_exit_on_charge"
     private const val KEY_IDLE_SCREEN_OFF = "idle_screen_off"
     private const val KEY_RESET_HOME = "reset_home_on_screen_off"
+    private const val KEY_RESET_SILENT = "reset_home_silent"
 
     /** 闲置多久判定为「没人在用」，单位秒。447 = 7 分 27 秒。改这里就能调整时长。 */
     const val IDLE_TIMEOUT_SEC = 447
@@ -111,6 +112,25 @@ object Prefs {
     fun setResetHomeOnScreenOff(ctx: Context, v: Boolean) {
         ctx.getSharedPreferences(SP, Context.MODE_PRIVATE)
             .edit().putBoolean(KEY_RESET_HOME, v).apply()
+    }
+
+    /**
+     * 归位方式：是否跳过亮屏时那段空白等待。
+     *
+     * true（默认）= 静默翻页：不重建桌面，在息屏期间短暂点亮显示并把背光压到 0，
+     * 借这个焦点按 HOME 把桌面滑回第一页。桌面进程始终活着，
+     * 所以亮屏第一帧就是完整主屏——没有那 0.6 秒「只有壁纸、图标还没出来」。
+     *
+     * false = 重建桌面：CLEAR_TASK 让 Activity 重建，屏幕全程不亮，
+     * 但亮屏后桌面要重新加载一次工作区，会看到约 0.6 秒的空白页。
+     */
+    fun resetSilent(ctx: Context): Boolean =
+        ctx.getSharedPreferences(SP, Context.MODE_PRIVATE)
+            .getBoolean(KEY_RESET_SILENT, true)
+
+    fun setResetSilent(ctx: Context, v: Boolean) {
+        ctx.getSharedPreferences(SP, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_RESET_SILENT, v).apply()
     }
 
     /** 是否有任意一个守护功能处于开启状态（决定脚本要不要装）。 */

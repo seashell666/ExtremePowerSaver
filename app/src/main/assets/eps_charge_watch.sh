@@ -31,7 +31,7 @@
 export PATH=/system/bin:/system/xbin:/sbin:/data/adb/magisk:$PATH
 
 # 脚本版本：App 侧会比对，不一致就自动重装覆盖（否则老脚本永远不升级）
-EPS_SCRIPT_VERSION=16
+EPS_SCRIPT_VERSION=17
 
 PIDFILE=/data/local/tmp/eps_charge_watch.pid
 IDLEPIDFILE=/data/local/tmp/eps_charge_watch.idle.pid
@@ -40,6 +40,11 @@ SKIPFILE=/data/local/tmp/eps_charge_watch.reset.skip
 LOG=/data/local/tmp/eps_charge_watch.log
 CFG=/data/local/tmp/eps_charge_watch.cfg
 URI=content://com.miui.powercenter.powersaver
+
+# 「静默翻页」期间压背光的开关文件。存在 = 那个忙等循环继续把背光写成 0。
+# 它必须比进程活得久一点：万一 watcher 被 kill，只要删掉这个文件，
+# 循环下一轮就会自己退出，不会把屏幕永久按黑。
+HOLDFILE=/data/local/tmp/eps_charge_watch.hold
 
 # ---- 默认值：三个功能都开（App 会写 cfg 覆盖）----
 ENABLE_CHARGE=1
@@ -50,6 +55,11 @@ IDLE_TIMEOUT=447
 # 息屏后多少秒把桌面翻回主页面。7 秒是用户定的：
 # 息屏后 7 秒内又亮屏，说明只是看一眼，保持原来的页面不动。
 RESET_DELAY=7
+
+# 归位方式：
+#   1 = 静默翻页（默认）：不重建桌面，亮屏第一帧就是完整主屏
+#   0 = 重建桌面：CLEAR_TASK 重建，亮屏后有约 0.6 秒只有壁纸、图标还没出来
+RESET_SILENT=1
 
 # 充电中「电量大到没必要再省电」的门槛，单位百分比。
 # 大于这个值（严格大于）才自动退出超级省电，77 → 78% 起才会动手。
@@ -78,6 +88,8 @@ if [ -r "$CFG" ]; then
     if [ -n "$v" ] && [ "$v" -ge 2 ] 2>/dev/null && [ "$v" -le 60 ] 2>/dev/null; then
         RESET_DELAY=$v
     fi
+    v=$(sed -n 's/^reset_silent=//p' "$CFG" 2>/dev/null | head -n1)
+    case "$v" in 0|1) RESET_SILENT=$v ;; esac
 fi
 
 log() {
@@ -130,12 +142,19 @@ kill_stale_child() {
 kill_stale_child "$IDLEPIDFILE" idle
 kill_stale_child "$RESETPIDFILE" reset
 
+# 上一条命可能正卡在静默翻页里。先撤掉背光压制开关，
+# 那个忙等循环下一轮就会退出，把背光还给系统。
+rm -f "$HOLDFILE"
+
 # 只监听真实终止信号，不要用 EXIT。
 # 原因：命令替换 $(date ...) / $(settings get ...) 会 fork 子 shell，
 # 子 shell 继承 EXIT trap，退出时也会打一条「daemon exiting」，实测造成
 # 「守护进程已死」的假象，严重误导排障。
 cleanup() {
     log "daemon terminating (pid $$)"
+    # 先撤掉背光压制开关：否则那个忙等循环会继续把亮度写成 0，
+    # 表现出来就是「进程没了，屏幕却一直是黑的」。
+    rm -f "$HOLDFILE"
     [ -n "$IDLE_PID" ] && kill -9 "$IDLE_PID" 2>/dev/null
     [ -n "$RESET_PID" ] && kill -9 "$RESET_PID" 2>/dev/null
     rm -f "$IDLEPIDFILE" "$RESETPIDFILE"
@@ -560,9 +579,23 @@ backlight_on() {
     return 0
 }
 
-# 让桌面重建一次，落回默认主页面。
-# 0x10008000 = FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK
+# 让桌面翻回默认主页面。$1 = 桌面包名（可空）
+#
+# 两种实现，由 cfg 里的 reset_silent 决定：
+#   1 = 静默翻页：不销毁桌面，靠「点亮显示 + 背光按 0」拿到焦点，再按 HOME 翻页。
+#       桌面进程一直活着，用户亮屏第一帧就是完整主屏，没有空白过渡。
+#   0 = 重建桌面：CLEAR_TASK 让 Activity 重建，屏幕全程不亮；但亮屏后要重新
+#       inflate 一次工作区，实测约 0.6 秒只有壁纸、图标还没出来。
 reset_launcher_page() {
+    if [ "$RESET_SILENT" = "1" ]; then
+        silent_home "$1"
+    else
+        rebuild_launcher
+    fi
+}
+
+# 重建桌面：0x10008000 = FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK
+rebuild_launcher() {
     _comp=$(/system/bin/cmd package resolve-activity --brief \
         -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null | tail -n1)
     case "$_comp" in
@@ -570,6 +603,86 @@ reset_launcher_page() {
         *) _comp="com.miui.home/.launcher.Launcher" ;;
     esac
     /system/bin/am start -n "$_comp" -f 0x10008000 >/dev/null 2>&1
+}
+
+# 静默翻页：把显示点亮，但把面板背光一路按在 0（肉眼是黑的），
+# 这样窗口才有焦点、HOME 才有人接；翻完立刻息屏。
+#
+# 为什么必须点亮显示：息屏时 mCurrentFocus=null、FocusedWindows=<none>，
+# InputDispatcher 没有投递目标，注入的按键会被直接丢弃（见 README 6.2）。
+# 而「显示 ON」不等于「看得见」——亮度由背光决定，压到 0 就一个光子都不发。
+#
+# 代价：显示会真的点亮约 2 秒。唤醒瞬间系统会按亮度设置写一次背光，
+# 我们只能在一帧（约 16ms）后压回去，夜里贴脸看可能有一丝闪。
+silent_home() {
+    _hp="$1"
+    [ -z "$_hp" ] && _hp=com.miui.home
+
+    _bl=$(find_backlight)
+    if [ -z "$_bl" ]; then
+        log "silent: no backlight node -> fallback to rebuild"
+        rebuild_launcher
+        return 0
+    fi
+    _orig=""
+    read _orig < "$_bl" 2>/dev/null
+    case "$_orig" in ''|*[!0-9]*) _orig=0 ;; esac
+
+    rm -f "$HOLDFILE"
+    : > "$HOLDFILE"
+    # 忙等、不 sleep：系统写入目标亮度后必须立刻盖回 0，
+    # 中间隔一次 fork 就会漏出一帧。
+    # 带上计数上限是保命的：万一这个 watcher 被 kill -9（来不及删开关文件），
+    # 循环最多再跑一阵就自己停，不会把屏幕永久按黑。
+    ( n=0; while [ -f "$HOLDFILE" ] && [ $n -lt 300000 ]; do
+          echo 0 > "$_bl" 2>/dev/null; n=$((n+1)); done ) &
+    _hold=$!
+
+    /system/bin/input keyevent 224      # WAKEUP：只为拿焦点
+    sleep 0.85
+
+    # 锁屏 / 来电 / 其他界面下不按 HOME：按了也没用，还可能误触
+    _focus=$(/system/bin/dumpsys window 2>/dev/null | grep -m1 mCurrentFocus)
+    case "$_focus" in
+        *"$_hp"*|*".launcher."*)
+            # 已经在桌面上，按一次 HOME 就回默认页；
+            # 补第二下是防止第一下被「唤醒转场」吞掉。
+            /system/bin/input keyevent 3
+            sleep 0.35
+            /system/bin/input keyevent 3
+            sleep 0.25
+            ;;
+        *)
+            log "silent: focus=[$_focus] -> skip HOME"
+            ;;
+    esac
+
+    # 这段大概要 2 秒。万一用户正好在这期间按了电源键（他以为屏幕还黑着），
+    # 系统会把显示切回 OFF——这时绝不能再补一发 SLEEP，
+    # 否则就是「用户按了一下，屏幕反而更黑了」。直接收工。
+    if ! screen_is_on; then
+        log "silent: user turned screen off during reset -> abort SLEEP"
+        rm -f "$HOLDFILE"
+        wait "$_hold" 2>/dev/null
+        return 0
+    fi
+
+    /system/bin/input keyevent 223      # SLEEP
+    sleep 0.25
+    rm -f "$HOLDFILE"
+    wait "$_hold" 2>/dev/null
+
+    if screen_is_on; then
+        # SLEEP 被吞了：屏幕还亮着而背光是 0，必须马上还给用户。
+        # 否则就是「点亮了但一片黑」，比不归位严重得多。
+        echo "$_orig" > "$_bl" 2>/dev/null
+        log "silent: still awake after SLEEP -> brightness restored"
+        return 1
+    fi
+    # 屏幕确实黑了：背光节点保持 0 才是正确状态。
+    # 这里千万别把旧亮度写回去——灭屏时节点非 0 会让归位监视器
+    # 把「黑屏」误判成「亮屏」，之后整个功能静默失效。
+    return 0
 }
 
 # 刚息屏时调用一次：判断前景是不是桌面，是就开始倒计时
@@ -632,8 +745,12 @@ handle_screen_off() {
         fi
     done
 
-    reset_launcher_page
-    log "screen off ${RESET_DELAY}s -> launcher back to main page"
+    reset_launcher_page "$_home"
+    if [ "$RESET_SILENT" = "1" ]; then
+        log "screen off ${RESET_DELAY}s -> launcher back to main page (silent)"
+    else
+        log "screen off ${RESET_DELAY}s -> launcher back to main page (rebuild)"
+    fi
 }
 
 screen_watch() {
@@ -743,7 +860,7 @@ if [ "$ENABLE_CHARGE" != "1" ] && [ "$ENABLE_IDLE" != "1" ] && [ "$ENABLE_RESET"
     exit 0
 fi
 
-log "features: charge=$ENABLE_CHARGE idle=$ENABLE_IDLE timeout=${IDLE_TIMEOUT}s exit_pct=${EXIT_BATTERY_PCT}% reset=$ENABLE_RESET/${RESET_DELAY}s"
+log "features: charge=$ENABLE_CHARGE idle=$ENABLE_IDLE timeout=${IDLE_TIMEOUT}s exit_pct=${EXIT_BATTERY_PCT}% reset=$ENABLE_RESET/${RESET_DELAY}s silent=$RESET_SILENT"
 
 if [ "$ENABLE_IDLE" = "1" ]; then
     idle_watch &

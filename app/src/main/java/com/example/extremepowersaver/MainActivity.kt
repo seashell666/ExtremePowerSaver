@@ -48,8 +48,8 @@ class MainActivity : AppCompatActivity() {
     private fun execute() {
         executor.execute {
             Log.i("EPS", "execute() start, cmd=" + Prefs.command(this))
-            // 1. 检查 root
-            if (!RootShell.isRootGranted()) {
+            // 1. 检查 root（首次安装要等用户在 Magisk 弹窗里点「允许」）
+            if (!waitForRoot()) {
                 Log.e("EPS", "root not granted")
                 finishWith(false, "未获得 root 权限", "请在 Magisk 中允许本应用（首次运行会弹窗）")
                 return@execute
@@ -107,6 +107,36 @@ class MainActivity : AppCompatActivity() {
             }
             finishWith(ok, if (ok) "已进入超级省电模式" else "执行失败", detail)
         }
+    }
+
+    /**
+     * 等 root 授权，而不是「问一次就判死」。
+     *
+     * 首次安装时，Magisk 的授权弹窗是由第一次 su 调用触发的，
+     * 用户从弹窗出现到点「允许」常常要好几秒。上一版这里只调一次
+     * isRootGranted()，一旦超时就当失败收场——结果是：脚本没装、
+     * 守护进程没起，用户必须再打开一次 App 才生效。
+     * （另一台同型号机器上就是这么表现的：装完授权完不生效，
+     *   点一次 App 进了超级省电之后才正常。）
+     *
+     * 现在改成等用户点完为止（最多约 30 秒），期间界面上给出提示。
+     */
+    private fun waitForRoot(): Boolean {
+        if (RootShell.isRootGranted(15)) return true
+        main.post { statusView.text = "等待 root 授权…" }
+        for (i in 1..18) {
+            main.post {
+                statusView.text = "等待 root 授权…"
+                detailView.text = "请在 Magisk 弹窗里点「允许」（已等 ${i}s）"
+            }
+            try {
+                Thread.sleep(1000)
+            } catch (e: InterruptedException) {
+                return false
+            }
+            if (RootShell.isRootGranted(8)) return true
+        }
+        return false
     }
 
     /**

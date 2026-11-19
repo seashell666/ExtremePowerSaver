@@ -354,6 +354,29 @@
                 android:textColor="@color/text_dark"
                 android:textSize="13sp"
                 app:buttonTint="@color/festive_red" />
+
+            <CheckBox
+                android:id="@+id/cbResetSilent"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="22dp"
+                android:layout_marginTop="2dp"
+                android:buttonTint="@color/festive_red"
+                android:checked="true"
+                android:text="跳过过渡空白（亮屏直接是完整主屏）"
+                android:textColor="@color/text_body"
+                android:textSize="13sp"
+                app:buttonTint="@color/festive_red" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="22dp"
+                android:layout_marginTop="2dp"
+                android:lineSpacingExtra="2dp"
+                android:text="勾选后不重建桌面，改成息屏期间短暂点亮一次显示、把背光压到 0，桌面自己滑回第一页——亮屏第一帧就是完整主屏。取消勾选则用重建方式，亮屏时会有约 0.6 秒只显示壁纸。"
+                android:textColor="@color/text_hint"
+                android:textSize="11sp" />
         </LinearLayout>
 
         <TextView

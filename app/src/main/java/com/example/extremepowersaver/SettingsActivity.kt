@@ -26,6 +26,7 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var cbAutoExit: CheckBox
     private lateinit var cbIdle: CheckBox
     private lateinit var cbReset: CheckBox
+    private lateinit var cbResetSilent: CheckBox
     private lateinit var tvWatchStatus: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -38,6 +39,7 @@ class SettingsActivity : AppCompatActivity() {
         cbAutoExit = findViewById(R.id.cbAutoExit)
         cbIdle = findViewById(R.id.cbIdle)
         cbReset = findViewById(R.id.cbReset)
+        cbResetSilent = findViewById(R.id.cbResetSilent)
         tvWatchStatus = findViewById(R.id.tvWatchStatus)
 
         editCommand.setText(Prefs.command(this))
@@ -47,6 +49,8 @@ class SettingsActivity : AppCompatActivity() {
         cbAutoExit.isChecked = Prefs.autoExitOnCharge(this)
         cbIdle.isChecked = Prefs.idleScreenOff(this)
         cbReset.isChecked = Prefs.resetHomeOnScreenOff(this)
+        cbResetSilent.isChecked = Prefs.resetSilent(this)
+        cbResetSilent.isEnabled = cbReset.isChecked
         cbAutoExit.setOnCheckedChangeListener { _, checked ->
             Prefs.setAutoExitOnCharge(this, checked)
             applyWatch()
@@ -57,9 +61,23 @@ class SettingsActivity : AppCompatActivity() {
         }
         cbReset.setOnCheckedChangeListener { _, checked ->
             Prefs.setResetHomeOnScreenOff(this, checked)
+            // 主开关关掉时，子选项没有意义，置灰但保留勾选状态
+            cbResetSilent.isEnabled = checked
+            applyWatch()
+        }
+        cbResetSilent.setOnCheckedChangeListener { _, checked ->
+            Prefs.setResetSilent(this, checked)
             applyWatch()
         }
         refreshWatchStatus()
+
+        // 打开设置页也做一次自愈。
+        // 主界面打开就切超级省电，很多人根本不会进去；如果只在主界面升级脚本，
+        // 「APK 更新了但行为还是老样子」就会一直挂着。这里顺手把版本补齐。
+        executor.execute {
+            ChargeWatch.ensureInstalled(this)
+            main.post { refreshWatchStatus() }
+        }
 
         findViewById<Button>(R.id.btnPresetEnter).setOnClickListener {
             editCommand.setText(Prefs.DEFAULT_ENTER)
@@ -87,6 +105,7 @@ class SettingsActivity : AppCompatActivity() {
         cbAutoExit.isEnabled = false
         cbIdle.isEnabled = false
         cbReset.isEnabled = false
+        cbResetSilent.isEnabled = false
         tvWatchStatus.text = "正在应用设置…"
 
         executor.execute {
@@ -95,6 +114,7 @@ class SettingsActivity : AppCompatActivity() {
                 cbAutoExit.isEnabled = true
                 cbIdle.isEnabled = true
                 cbReset.isEnabled = true
+                cbResetSilent.isEnabled = cbReset.isChecked
                 if (!ok) Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                 refreshWatchStatus()
             }
