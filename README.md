@@ -7,6 +7,11 @@
 > 本方案已在真机（M2011K2C / Android 13 / MIUI V140 / V14.0.10.0.TKBCNXM / Magisk）上
 > 反复实测通过。
 
+> **下载**：最新版 **v1.9** ——
+> [Release 说明](https://github.com/seashell666/ExtremePowerSaver/releases/tag/v1.9) ·
+> [ExtremePowerSaver-v1.9.apk](https://github.com/seashell666/ExtremePowerSaver/releases/download/v1.9/ExtremePowerSaver-v1.9.apk)
+> （debug 签名，覆盖安装可直接升级）
+
 <p>
   <img src="docs/home.png" width="230" alt="打开即进入超级省电">
   <img src="docs/settings.png" width="230" alt="命令设置页">
@@ -114,7 +119,8 @@ W SuperPowerSaveManager: switchSuperPower enter super power :
 
 ```bash
 # MIUI 默认拦截 adb install，用 root 装（或手动传手机点安装）
-adb push 超级省电.apk /data/local/tmp/eps.apk
+# 文件名以 Release 里的为准：ExtremePowerSaver-v1.9.apk
+adb push ExtremePowerSaver-v1.9.apk /data/local/tmp/eps.apk
 adb shell su -c "pm install -r -t /data/local/tmp/eps.apk"
 ```
 
