@@ -8,9 +8,16 @@
 #           （超级省电模式下不生效，由本脚本主动跳过）
 #  功能三 · 息屏归位主屏：在桌面但不在第一页时息屏，N 秒后把桌面翻回主页面，
 #           全程屏幕保持黑屏；N 秒内重新亮屏则保持原样
+#  功能四 · 屏蔽 NFC 刷卡页（彩蛋）：刷门禁时不再弹出「请靠近读卡器」整页 UI，
+#           卡模拟本身不受影响
 #
 #  由 App 安装到 /data/adb/service.d/ ，开机由 Magisk 以 root 启动
 #  也可被 App 立即手动拉起
+#
+#  自毁：脚本不在 APK 里，卸载 App 带不走它。所以每次开机与运行期间
+#        都会检查 App 还在不在（看 /data/app 的 APK 目录 + pm path）；
+#        确认已卸载就还原 NFC 组件、杀掉自己的子进程、删掉自己。
+#        （这就是「App 卸载了功能还在」的原因）
 #
 #  关键设计：
 #  1) 启动后立刻 setsid 自我脱离到新 session，然后父进程退出。
@@ -31,7 +38,7 @@
 export PATH=/system/bin:/system/xbin:/sbin:/data/adb/magisk:$PATH
 
 # 脚本版本：App 侧会比对，不一致就自动重装覆盖（否则老脚本永远不升级）
-EPS_SCRIPT_VERSION=17
+EPS_SCRIPT_VERSION=20
 
 PIDFILE=/data/local/tmp/eps_charge_watch.pid
 IDLEPIDFILE=/data/local/tmp/eps_charge_watch.idle.pid
@@ -41,15 +48,29 @@ LOG=/data/local/tmp/eps_charge_watch.log
 CFG=/data/local/tmp/eps_charge_watch.cfg
 URI=content://com.miui.powercenter.powersaver
 
+# ---- NFC 刷卡页（小米智能卡）----
+# 刷门禁时把整页「请靠近读卡器」顶到前台的就是这个 Activity。
+# 它只负责界面，NFC 卡模拟走 SE 服务，所以 disable 它不影响刷卡。
+# 代价：双击电源键唤起刷卡页用的是同一个 Activity，会一起失效。
+NFC_COMP=com.miui.tsmclient/com.miui.tsmclient.ui.quick.DoubleClickActivity
+# 标记「这个组件是本脚本关掉的」。只有带标记才敢在关掉功能/卸载时重新启用，
+# 否则会覆盖用户自己通过别的方式做的设置。
+NFC_MARK=/data/local/tmp/eps_charge_watch.nfc
+
+# 应用包名与自身路径：用于「App 已卸载 → 自毁」
+APP_PKG=com.example.extremepowersaver
+SELF="$0"
+
 # 「静默翻页」期间压背光的开关文件。存在 = 那个忙等循环继续把背光写成 0。
 # 它必须比进程活得久一点：万一 watcher 被 kill，只要删掉这个文件，
 # 循环下一轮就会自己退出，不会把屏幕永久按黑。
 HOLDFILE=/data/local/tmp/eps_charge_watch.hold
 
-# ---- 默认值：三个功能都开（App 会写 cfg 覆盖）----
+# ---- 默认值：四个功能都开（App 会写 cfg 覆盖）----
 ENABLE_CHARGE=1
 ENABLE_IDLE=1
 ENABLE_RESET=1
+ENABLE_NFC=1
 IDLE_TIMEOUT=447
 
 # 息屏后多少秒把桌面翻回主页面。7 秒是用户定的：
@@ -90,6 +111,8 @@ if [ -r "$CFG" ]; then
     fi
     v=$(sed -n 's/^reset_silent=//p' "$CFG" 2>/dev/null | head -n1)
     case "$v" in 0|1) RESET_SILENT=$v ;; esac
+    v=$(sed -n 's/^nfc_block=//p' "$CFG" 2>/dev/null | head -n1)
+    case "$v" in 0|1) ENABLE_NFC=$v ;; esac
 fi
 
 log() {
@@ -146,6 +169,17 @@ kill_stale_child "$RESETPIDFILE" reset
 # 那个忙等循环下一轮就会退出，把背光还给系统。
 rm -f "$HOLDFILE"
 
+# 杀一个 pid 连同它的直接子进程。
+# idle 子壳常年卡在 `timeout 447 dd` 上，只杀壳会把这个 dd 留成孤儿
+# （最长残留一整个超时周期），所以先按 /proc/<pid>/task/<pid>/children 收一遍。
+kill_pid_tree() {
+    [ -n "$1" ] || return 0
+    for c in $(cat "/proc/$1/task/$1/children" 2>/dev/null); do
+        kill -9 "$c" 2>/dev/null
+    done
+    kill -9 "$1" 2>/dev/null
+}
+
 # 只监听真实终止信号，不要用 EXIT。
 # 原因：命令替换 $(date ...) / $(settings get ...) 会 fork 子 shell，
 # 子 shell 继承 EXIT trap，退出时也会打一条「daemon exiting」，实测造成
@@ -155,8 +189,8 @@ cleanup() {
     # 先撤掉背光压制开关：否则那个忙等循环会继续把亮度写成 0，
     # 表现出来就是「进程没了，屏幕却一直是黑的」。
     rm -f "$HOLDFILE"
-    [ -n "$IDLE_PID" ] && kill -9 "$IDLE_PID" 2>/dev/null
-    [ -n "$RESET_PID" ] && kill -9 "$RESET_PID" 2>/dev/null
+    kill_pid_tree "$IDLE_PID"
+    kill_pid_tree "$RESET_PID"
     rm -f "$IDLEPIDFILE" "$RESETPIDFILE"
     exit 0
 }
@@ -306,6 +340,92 @@ leave_when_battery_high() {
     fi
     # 给系统一点时间落地，避免紧接着的复查读到退出前的旧状态
     sleep 8
+}
+
+# ---- 应用卸载自检 / 自毁 ----
+#
+# 为什么需要：脚本装在 /data/adb/service.d/，不属于 APK。卸载 App 之后
+# 它还在，Magisk 每次开机照跑，表现就是「App 都卸了，回桌面+息屏还会冒出来」。
+# （用户以为它在 Vector/Xposed 里，其实是这里。）
+#
+# 判定用 /data/app 里的 APK 目录，**不能**用 /data/data/<pkg>：
+# 守护进程是 App 通过 su 拉起的，Magisk 默认让它继承 App 的 mount namespace，
+# 而那个 namespace 里 App 自己的数据目录是 bind mount——卸载之后
+# /proc/<daemon>/root/data/data/<pkg> 依然存在（实测），判据会永远为真。
+# /data/app 的 APK 目录不受这个影响，卸载后两个 namespace 里都消失。
+# 目录不在时再用 pm 确认一次（安装/更新的一瞬间可能刚好没有目录）。
+# 两个坑，都踩过：
+#   1. `pm list packages <pkg>` 在**未安装**时输出为空、退出码仍是 0（实测），
+#      单看输出会把它当成「命令异常」，于是保守兜底成「还装着」，自毁永远不触发。
+#      改用 `pm path`：未安装时退出码 1、无输出，能区分开。
+#   2. 开机早期 pm 还没就绪，任何查询都会失败——先当作装着，交给主循环下一轮再判。
+app_installed() {
+    for d in /data/app/*/"$APP_PKG"-*; do
+        [ -d "$d" ] && return 0
+    done
+    # pm 是否已经就绪（拿必然存在的 Shell 包试；未就绪时查不到任何东西）
+    [ -n "$(pm path com.android.shell 2>/dev/null)" ] || return 0
+    case "$(pm path "$APP_PKG" 2>/dev/null)" in
+        *"package:"*) return 0 ;;
+    esac
+    return 1
+}
+
+self_destruct() {
+    log "app ($APP_PKG) not installed -> restore nfc page and remove self"
+    # 恢复 NFC 刷卡页：卸载了就该把系统还原成原样
+    if [ -f "$NFC_MARK" ]; then
+        pm enable --user 0 "$NFC_COMP" >/dev/null 2>&1
+        rm -f "$NFC_MARK"
+    fi
+    rm -f "$HOLDFILE"
+    # 必须在这里杀子进程，不能靠「退出主进程」——子壳是独立进程，
+    # 主进程没了它们照样按原配置回桌面 + 息屏（实测：脚本删了功能还在）。
+    kill_pid_tree "$IDLE_PID"
+    kill_pid_tree "$RESET_PID"
+    rm -f "$PIDFILE" "$IDLEPIDFILE" "$RESETPIDFILE" "$SKIPFILE" "$CFG" "$LOG"
+    rm -f "$SELF"
+    exit 0
+}
+
+# 每 60 秒一次的家务：NFC 屏蔽没落上就重试、应用卸载了就自毁。
+#
+# 关键：**只能从主 shell 调用**。函数跑在 `cmd &` 起的子壳里时，
+# $$ 指向父 shell、IDLE_PID/RESET_PID 也还是 fork 那一刻的空值，
+# 结果就是「脚本删掉了、pid 文件删掉了，但 idle/reset 子进程还在跑」——
+# 功能照旧生效，正是这个功能要消灭的现象。
+housekeeping() {
+    if [ "$ENABLE_NFC" = "1" ] && [ ! -f "$NFC_MARK" ]; then
+        apply_nfc_block
+    fi
+    if ! app_installed; then
+        # 连续两次确认（间隔 5 秒），避免 App 正在覆盖安装时误判
+        sleep 5
+        app_installed || self_destruct
+    fi
+}
+
+# ---- 功能四：屏蔽 NFC 刷卡页 ----
+#
+# 刷门禁 / 公交时，小米智能卡会把整页「请靠近读卡器」顶到前台。
+# 这个界面是独立 Activity，关掉它不影响 NFC 卡模拟（走 SE 服务）。
+# 只关带标记的：标记在 = 是本脚本关的，才敢在关闭功能/卸载时重新启用。
+apply_nfc_block() {
+    if [ "$ENABLE_NFC" = "1" ]; then
+        [ -f "$NFC_MARK" ] && return 0
+        if pm disable --user 0 "$NFC_COMP" >/dev/null 2>&1; then
+            echo 1 > "$NFC_MARK"
+            log "nfc swipe page blocked ($NFC_COMP)"
+        else
+            log "nfc swipe page block failed (component not found?)"
+        fi
+    else
+        [ -f "$NFC_MARK" ] || return 0
+        if pm enable --user 0 "$NFC_COMP" >/dev/null 2>&1; then
+            rm -f "$NFC_MARK"
+            log "nfc swipe page restored"
+        fi
+    fi
 }
 
 # ---- 功能二：闲置息屏 ----
@@ -791,6 +911,7 @@ screen_watch() {
 charge_loop() {
     prev=""
     tick=0
+    hk=0
     # 连续多少次复查确认「还老老实实待在超级省电里」。
     # 用来避免「刚手动进了超级省电就被这条规则踢出来 + 立刻黑屏」。
     sp_seen=0
@@ -849,18 +970,36 @@ charge_loop() {
             sp_seen=0
         fi
 
+        # 家务计数：每 30 轮（≈60 秒）查一次应用还在不在、NFC 屏蔽有没有被系统改回去。
+        # 用轮数而不是 `date +%s`，避免每 2 秒 fork 一次。
+        hk=$((hk + 1))
+        if [ "$hk" -ge 30 ]; then
+            hk=0
+            housekeeping
+        fi
+
         sleep 2
     done
 }
 
 # ---- 启动 ----
-if [ "$ENABLE_CHARGE" != "1" ] && [ "$ENABLE_IDLE" != "1" ] && [ "$ENABLE_RESET" != "1" ]; then
+
+# 应用已经被卸载：还原 NFC 组件、删掉脚本自己，不留任何尾巴。
+# 每次开机 Magisk 都会执行本脚本，所以这一句就是「卸载后不再复活」的闸门。
+app_installed || self_destruct
+
+if [ "$ENABLE_CHARGE" != "1" ] && [ "$ENABLE_IDLE" != "1" ] && \
+   [ "$ENABLE_RESET" != "1" ] && [ "$ENABLE_NFC" != "1" ]; then
     log "all features disabled, exiting"
     rm -f "$PIDFILE"
     exit 0
 fi
 
-log "features: charge=$ENABLE_CHARGE idle=$ENABLE_IDLE timeout=${IDLE_TIMEOUT}s exit_pct=${EXIT_BATTERY_PCT}% reset=$ENABLE_RESET/${RESET_DELAY}s silent=$RESET_SILENT"
+# 先把 NFC 刷卡页处理掉。pm 在开机早期可能还没就绪，失败也不要紧：
+# 主循环每 60 秒会重试，直到标记落上为止。
+apply_nfc_block
+
+log "features: charge=$ENABLE_CHARGE idle=$ENABLE_IDLE timeout=${IDLE_TIMEOUT}s exit_pct=${EXIT_BATTERY_PCT}% reset=$ENABLE_RESET/${RESET_DELAY}s silent=$RESET_SILENT nfc_block=$ENABLE_NFC"
 
 if [ "$ENABLE_IDLE" = "1" ]; then
     idle_watch &
@@ -877,10 +1016,10 @@ fi
 if [ "$ENABLE_CHARGE" = "1" ]; then
     charge_loop
 else
-    # 不跑充电循环：主进程不空转，直接等子进程
-    if [ -n "$IDLE_PID" ]; then
-        wait "$IDLE_PID"
-    else
-        wait "$RESET_PID"
-    fi
+    # 不跑充电循环：主进程不空转，每 60 秒做一次家务（NFC 重试 + 卸载检查），
+    # 其余时间全阻塞在 sleep 上。
+    while true; do
+        sleep 60
+        housekeeping
+    done
 fi

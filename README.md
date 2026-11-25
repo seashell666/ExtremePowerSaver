@@ -10,7 +10,9 @@
 <p>
   <img src="docs/home.png" width="230" alt="打开即进入超级省电">
   <img src="docs/settings.png" width="230" alt="命令设置页">
-  <img src="docs/settings2.png" width="230" alt="自动化开关：充电退出 / 闲置息屏 / 息屏归位主屏">
+</p>
+<p>
+  <img src="docs/settings2.png" width="270" alt="设置页全貌：命令 / 充电自动退出 / 闲置息屏 / 息屏归位主屏 / NFC 刷卡弹窗（彩蛋）">
 </p>
 
 ## 外观
@@ -34,6 +36,9 @@
   **全程屏幕不亮**；7 秒内又亮屏则保持原样。见第六章。
 - **跳过过渡空白**：归位默认用「静默翻页」，亮屏第一帧就是完整主屏，
   不会先黑一下、再只显示壁纸。见 6.7 / 6.8。
+- **屏蔽 NFC 刷卡弹窗**（彩蛋）：刷门禁时不再弹出整页「请靠近读卡器」，
+  卡模拟本身不受影响。见第八章。
+- **卸载即自毁**：卸掉 APK 之后，守护脚本不会继续留在 `service.d` 里作妖。见第七章。
 - **命令可改**：默认内置「进入 / 退出」两条命令，也可以换成任意 root 命令。
 
 ## 环境要求
@@ -623,7 +628,327 @@ v1.8 换了个思路——**不重建桌面**：
 设置页第四张卡片下面就是这个开关，**默认勾选**；取消勾选回到 v1.7 的重建方式。
 `cfg` 里对应 `reset_silent=1/0`。
 
-## 七、编译
+## 七、卸载即自毁：为什么「APK 都卸了，回桌面+息屏还会冒出来」
+
+### 7.1 现象
+
+把 APK 卸掉、Magisk 里也看不到任何模块了，过一会儿手机还是会自己回主屏、自己息屏。
+第一反应通常是「是不是 Vector / Xposed 里还留着模块」——**不是**。本 App 从头到尾
+没有 Xposed 代码，所有自动化都在一个 shell 脚本里。
+
+### 7.2 根因：脚本根本不在 APK 里
+
+```
+/data/adb/service.d/eps_charge_watch.sh     ← 真正的功能在这里
+```
+
+Magisk 每次开机都会把 `service.d/` 下的脚本全跑一遍，**跟 APK 在不在没有半点关系**。
+卸载 App 只会删掉 `/data/app/.../base.apk` 和 `/data/data/<pkg>`，
+`service.d` 里的脚本、`/data/local/tmp` 里的 cfg/pid/log 全都原地不动。
+所以「App 卸了功能还在」是必然结果，不是偶发。
+
+v19 起加了两道闸：
+
+| 时机 | 动作 |
+|---|---|
+| 脚本启动时（开机 / App 拉起） | 第一件事就是 `app_installed \|\| self_destruct`，没装就直接退出并删自己 |
+| 运行期间 | 主循环每 60 秒查一次，连续两次判定「已卸载」就自毁 |
+
+### 7.3 坑一：第一版判据用 `/data/data`，永远是「装着」
+
+最直观的写法是「看 `/data/data/<pkg>` 还在不在」。实测**永远为真**：
+
+```bash
+# 卸载 APK 之后，从 shell 里看
+shell $ ls -d /data/data/com.example.extremepowersaver
+ls: /data/data/com.example.extremepowersaver: No such file or directory   # 没了
+
+# 但同一个时刻，从守护进程的视角看
+shell $ su -c 'ls -d /proc/32216/root/data/data/com.example.extremepowersaver'
+/proc/32216/root/data/data/com.example.extremepowersaver                  # 还在！
+```
+
+原因在 namespace：
+
+```bash
+shell $ readlink /proc/32216/ns/mnt      # 守护进程
+mnt:[4026534461]
+shell $ readlink /proc/self/ns/mnt       # 普通 shell
+mnt:[4026533494]
+```
+
+守护进程是 App 通过 `su` 拉起来的，Magisk 默认让它**继承 App 的 mount namespace**。
+在那个 namespace 里，App 自己的数据目录是 Magisk 做的 bind mount（为了让它能读写
+自己的私有目录），卸载只删了真实路径，bind mount 的挂载点还挂着。
+于是「`/data/data/<pkg>` 存在」这个判据在守护进程眼里**永远为真**，
+自毁逻辑一次都没触发过。
+
+### 7.4 坑二：第二版改用 `pm list packages` 兜底，还是失败
+
+`/data/app` 里的 APK 目录是对的判据——它不受 bind mount 影响，卸载后两个 namespace
+里都消失。问题是当时的兜底分支写错了：
+
+```sh
+out=$(pm list packages "$APP_PKG" 2>/dev/null)
+case "$out" in
+    *"package:$APP_PKG"*) return 0 ;;   # 明确装着
+    *"package:"*) return 1 ;;           # 明确没装
+    *) return 0 ;;                      # ← 空输出落到这里，当成「命令异常，保守留着」
+esac
+```
+
+实测这条命令在**未安装**时的行为：
+
+```bash
+shell $ pm list packages com.example.extremepowersaver
+（完全没有输出）
+shell $ echo $?
+0
+```
+
+**输出为空，退出码却是 0**。于是「保守兜底」这一支把「已卸载」吞成了「还装着」，
+自毁还是不触发。这一版在真机上跑了 **144 秒**，观察到的始终是
+`script=1 mark=1 pid=alive`，日志一行都不动。
+
+排查这一步的关键是别只看文件、要看**行为**：手动删掉 NFC 标记文件后 60 秒内它被重建，
+日志有 `nfc swipe page blocked`——说明循环活着、动作也在执行，**只有判据那一步是错的**。
+
+### 7.5 坑三：自毁跑了，进程却还在
+
+第三版把判据改对之后，`service.d` 里的脚本没了、pid 文件没了、cfg 也没了，
+`ls` 一看「全清干净了」。但 `ps` 里还有三个进程：
+
+```
+22178 sh /data/adb/service.d/eps_charge_watch.sh        ← 主进程（charge_loop 仍在转）
+22226 sh /data/adb/service.d/eps_charge_watch.sh        ← idle 子壳
+22227 sh /data/adb/service.d/eps_charge_watch.sh        ← reset 子壳
+```
+
+原因：那一版的检查是扔进 `reaper &` 这个**子 shell** 里跑的。子 shell 的世界里：
+
+- `$$` 还是**父 shell 的 pid**（POSIX 规定），`exit 0` 只退出了子 shell 自己
+- `IDLE_PID` / `RESET_PID` 是 fork 那一刻的值——那时候它们还没被赋值，全是空串
+- 于是 `kill -9 ""` 什么也没杀
+
+结果就是**最坏的一种「假成功」**：文件层面的证据全都对，功能却照旧生效
+（idle 到点照样回桌面 + 息屏），直到重启才停。这恰好就是用户抱怨的那个现象。
+
+### 7.6 现在的判据与结构
+
+判据换成了 `pm path`，未安装时它**退出码 1、无输出**，能和「命令异常」区分开；
+再加一道「pm 是否就绪」的探针，开机早期查不到东西就先当作装着：
+
+```sh
+app_installed() {
+    for d in /data/app/*/"$APP_PKG"-*; do
+        [ -d "$d" ] && return 0
+    done
+    # pm 还没就绪（开机早期）时所有查询都失败 → 先当作装着
+    [ -n "$(pm path com.android.shell 2>/dev/null)" ] || return 0
+    case "$(pm path "$APP_PKG" 2>/dev/null)" in
+        *"package:"*) return 0 ;;
+    esac
+    return 1
+}
+```
+
+结构上把 `reaper &` 这个后台子 shell **整个去掉**了，改成 `housekeeping()`
+由主 shell 调用：
+
+| 场合 | 调用频率 |
+|---|---|
+| 跑充电循环时 | 每 30 轮（`sleep 2`，约 60 秒） |
+| 没开充电循环时 | 主进程每 60 秒一次（其余时间全阻塞在 `sleep` 上，不空转） |
+| 脚本启动时 | `app_installed \|\| self_destruct` 直接判一次 |
+
+这样 `self_destruct` 一定跑在**主 shell** 里：`$$` 是对的、两个子进程 pid 都在手里、
+`exit 0` 退的是真正的主进程。少了一个常驻子进程，稳态开销也更低。
+
+### 7.7 自毁都清理什么
+
+```sh
+self_destruct() {
+    # 1. 把 NFC 刷卡页还回去（只在有标记文件时才动，见第八章）
+    [ -f "$NFC_MARK" ] && pm enable --user 0 "$NFC_COMP" && rm -f "$NFC_MARK"
+    # 2. 撤掉背光压制开关，防止屏幕被按黑（见 6.8）
+    rm -f "$HOLDFILE"
+    # 3. 杀掉子进程（连它们的子进程一起）
+    kill_pid_tree "$IDLE_PID"
+    kill_pid_tree "$RESET_PID"
+    # 4. 删掉所有状态文件
+    rm -f "$PIDFILE" "$IDLEPIDFILE" "$RESETPIDFILE" "$SKIPFILE" "$CFG" "$LOG"
+    # 5. 最后删自己，然后退出主进程
+    rm -f "$SELF"
+    exit 0
+}
+```
+
+`kill_pid_tree` 会先按 `/proc/<pid>/task/<pid>/children` 把子进程收一遍再杀壳——
+idle 子壳常年卡在 `timeout 447 dd` 上，只杀壳会留下一个孤儿 `dd`
+（最长残留一整个超时周期，虽然它自己不执行动作，但白白占着 fd）。
+
+顺序也不能换：**先恢复系统状态，再删状态文件，最后删脚本**。
+反过来的话标记文件一没，就不知道那个组件是不是自己关的了（8.5）。
+
+### 7.8 怎么验证
+
+```bash
+# 装好 App、确认守护进程在跑
+adb shell su -c 'cat /data/local/tmp/eps_charge_watch.pid'
+
+# 一边盯着日志一边卸载（自毁会把日志一起删掉，事后看不到）
+adb shell su -c 'tail -f /data/local/tmp/eps_charge_watch.log' &
+adb shell pm uninstall com.example.extremepowersaver
+#   app (com.example.extremepowersaver) not installed -> restore nfc page and remove self
+
+# 三样东西应该同时归零
+adb shell su -c 'ls /data/adb/service.d/'          # 没有 eps_charge_watch.sh
+adb shell su -c 'ls /data/local/tmp | grep eps'    # 空
+adb shell su -c 'ps -A -o PID,ARGS | grep eps_charge_watch'   # 空
+```
+
+真机实测时间线（卸载那一轮）：
+
+| 时刻 | 观察 |
+|---|---|
+| 09:23:43 | `pm uninstall` 成功 |
+| 09:24:24 | 主循环跑到第 60 秒，`app_installed` 判定「已卸载」 |
+| 09:24:29 | 5 秒后二次确认仍为「已卸载」，开始自毁 |
+| 09:24:42 | 轮询看到 `script=0 mark=0 procs=0`（**卸载后 59 秒**） |
+
+所以实际是「0~65 秒内」，取决于卸载时离下一次 60 秒周期还剩多少——
+不是立刻，别按下卸载就以为没生效。想更快只能把 `charge_loop` 里的 30 轮改小。
+
+再开机一次确认：`service.d` 里没有本脚本，它不会再自己回来。
+
+> 顺带一个坑：**卸载重装之后 UID 会变**，Magisk 里那条旧的授权就失效了，
+> App 写 cfg 会报 `writeConfig => Permission denied`（exit=13），表现是开关点了没反应。
+> 在 Magisk 里把旧的删掉重新授权一次即可；批量救急可以直接写策略表：
+> ```bash
+> adb shell su -c 'magisk --sqlite "INSERT OR REPLACE INTO policies (uid,policy,until,logging,notification) VALUES (<新UID>,2,0,1,1)"'
+> ```
+
+## 八、屏蔽 NFC 刷卡弹窗（彩蛋）
+
+### 8.1 需求
+
+刷小区门禁的时候，MIUI 会整页弹出一个「请靠近读卡器」的界面
+（`com.miui.tsmclient`，小米智能卡）。它不是浮层，是一个**全屏 Activity**：
+正在刷抖音、看网页、回消息的时候，屏幕直接被顶走，刷完还得手动切回去。
+门禁就在兜里掏出来碰一下，根本不需要看这个页面。
+
+要的效果：**界面不弹，卡照样能刷**。
+
+### 8.2 弹的是哪个组件
+
+```bash
+adb shell dumpsys activity activities | grep -i tsmclient
+#   * ActivityRecord{... com.miui.tsmclient/.ui.quick.DoubleClickActivity}
+```
+
+```
+com.miui.tsmclient/com.miui.tsmclient.ui.quick.DoubleClickActivity
+```
+
+名字里带 `DoubleClick`——它本来是「双击电源键唤起刷卡」的入口，
+MIUI 在检测到 NFC 场（读卡器）时也会主动把它拉起来，于是就变成了每次碰门禁都弹。
+
+### 8.3 `pm disable-user` 为什么不顶用
+
+这是本节最值得记的一条，我第一次就是被它骗了：
+
+| 命令 | 返回 | 实际效果 |
+|---|---|---|
+| `pm disable-user --user 0 <组件>` | `new state: default` | **无效**，`am start` 照样能打开，界面照弹 |
+| `pm disable --user 0 <组件>` | `new state: disabled` | 生效，`am start` 报 `Error type 3 ... does not exist` |
+
+对**系统 App**，`disable-user` 会被降级成 `default`（只是「恢复用户默认状态」，
+而系统 App 的默认状态就是启用）。必须用 `pm disable`。`--user 0` 不能省，
+否则只影响当前用户之外的上下文。
+
+脚本里对应的就是：
+
+```sh
+pm disable --user 0 com.miui.tsmclient/com.miui.tsmclient.ui.quick.DoubleClickActivity
+```
+
+### 8.4 为什么刷卡不受影响
+
+`DoubleClickActivity` 只是「把界面调起来」的那一层。真正的卡模拟在这条链上：
+
+```
+NFC 控制器 → com.android.nfc → SE（安全芯片）/ eSE → com.miui.tsmclient 的卡模拟服务
+```
+
+界面 Activity 不在链上。它被禁用之后：
+
+- 碰门禁 → **不再弹页**，NFC 场照常被识别，卡模拟照常应答
+- 手动打开智能卡 App 进卡包（`MainActivity` → `CardListActivity`）→ 正常，卡列表、卡面都在
+- 深链 `tsmclient://swiping` → 被拦（`unable to resolve Intent`），这正是我们要的
+
+> 只动了这一个 Activity，NFC 服务、SE 服务、`com.miui.tsmclient` 的其他组件一个都没碰。
+> 装好后建议你自己刷一次门禁确认——毕竟这项功能的价值就在于「刷卡不能坏」。
+
+### 8.5 只恢复自己关掉的东西
+
+组件禁用是**系统级持久状态**，App 卸载、脚本删掉都不会自动还原。
+所以绝对不能「只要开关关了就去 `pm enable`」——万一用户是自己手动禁用的，
+我们就把它打开了。
+
+用一个标记文件记账：
+
+```
+/data/local/tmp/eps_charge_watch.nfc     # 存在 = 这个组件是我关的
+```
+
+```sh
+apply_nfc_block() {
+    if [ "$ENABLE_NFC" = "1" ]; then
+        [ -f "$NFC_MARK" ] && return 0          # 已经关了，不重复执行
+        pm disable --user 0 "$NFC_COMP" && echo 1 > "$NFC_MARK"
+    else
+        [ -f "$NFC_MARK" ] || return 0          # 不是我关的，别碰
+        pm enable --user 0 "$NFC_COMP" && rm -f "$NFC_MARK"
+    fi
+}
+```
+
+三处调用：脚本启动时一次、开关变化时一次、主循环每 60 秒一次。
+最后一处是为了防 MIUI 系统更新（OTA）把组件状态重置回启用——
+重置了我们就在一分钟内再关一次，不需要用户干预。
+
+万一标记文件丢了（清了 `/data/local/tmp`、或者手动 `rm` 掉了），
+组件会一直保持禁用，恢复方法：
+
+```bash
+adb shell su -c 'pm enable --user 0 com.miui.tsmclient/com.miui.tsmclient.ui.quick.DoubleClickActivity'
+```
+
+### 8.6 开关与验证
+
+设置页**最下面第五张卡片**（标着「彩蛋」），默认勾选，cfg 里是 `nfc_block=1/0`。
+
+```bash
+# 关掉之后
+adb shell su -c 'pm list packages -d | grep tsmclient'   # 应该能查到被禁用的组件
+adb shell am start -n com.miui.tsmclient/.ui.quick.DoubleClickActivity
+#   Error type 3 ... does not exist
+
+# 重新勾上之后
+adb shell su -c 'dumpsys package com.miui.tsmclient | grep -A2 DoubleClickActivity'
+#   enabled=true
+adb shell su -c 'tail -3 /data/local/tmp/eps_charge_watch.log'
+#   nfc swipe page restored
+```
+
+日志里两种状态各一行，很好认：
+
+```
+nfc swipe page blocked (com.miui.tsmclient/com.miui.tsmclient.ui.quick.DoubleClickActivity)
+nfc swipe page restored
+```
+
+## 九、编译
 
 需要 JDK 17 + Android SDK（platform 34）。仓库自带 Gradle Wrapper（8.7）。
 
@@ -642,18 +967,18 @@ echo "sdk.dir=/path/to/Android/sdk" > local.properties
 本机实测可用环境：JDK 17 + Android SDK platform-34（build-tools 34.0.0），
 Gradle 由仓库自带的 Wrapper 8.7 提供，不需要单独安装。
 
-## 八、代码结构
+## 十、代码结构
 
 | 文件 | 作用 |
 |---|---|
 | `MainActivity.kt` | 打开即执行，检查 root → 执行命令 → 结果提示 → 退出；含"充电中电量已过 77% 就不进入"守卫 |
 | `RootShell.kt` | su 探测与 `su -c` 执行封装（多路径探测 + 超时 + 被中断容错） |
-| `ChargeWatch.kt` | 充电守护进程的安装/启停/状态查询（写 service.d、拉起、校验 pid 身份） |
-| `SettingsActivity.kt` | 命令编辑、预设（进入/退出）、立即测试、三个自动化开关与守护状态 |
+| `ChargeWatch.kt` | 充电守护进程的安装/启停/状态查询（写 service.d、拉起、校验 pid 身份、脚本版本比对） |
+| `SettingsActivity.kt` | 命令编辑、预设（进入/退出）、立即测试、四个自动化开关与守护状态 |
 | `Prefs.kt` | 命令与开关的本地存储 |
-| `assets/eps_charge_watch.sh` | 守护脚本本体（开机自启 + 脱壳 + sysfs 轮询 + 调 provider 退出 + 满 77% 退出 + 闲置息屏 + 息屏归位；v15 起省电判定只看前台，v16 起增加归位监视，v17 起归位默认走静默翻页） |
+| `assets/eps_charge_watch.sh` | 守护脚本本体（开机自启 + 脱壳 + sysfs 轮询 + 调 provider 退出 + 满 77% 退出 + 闲置息屏 + 息屏归位 + 屏蔽 NFC 刷卡页 + 卸载自毁；v15 起省电判定只看前台，v16 起增加归位监视，v17 起归位默认走静默翻页，v19 起增加 NFC 屏蔽与自毁） |
 
-## 九、已知问题与注意事项
+## 十一、已知问题与注意事项
 
 - **首次运行必须在 Magisk 弹窗点「允许」**，否则 `su -c id` 返回 `Permission denied`，
   App 会提示"未获得 root 权限"。可通过 logcat 过滤 `EPS` 标签排查。
@@ -668,12 +993,47 @@ Gradle 由仓库自带的 Wrapper 8.7 提供，不需要单独安装。
   要判断"插没插电源"，用 `ACTION_BATTERY_CHANGED` 的 `EXTRA_PLUGGED != 0`，
   它和内核 sysfs 的 `online` 同源，也和守护脚本的口径一致。
 - 本 App 只下发切换命令，不联网、不上传数据；充电守护进程也不产生网络请求。
+- **卸载重装后要重新授权 root**：新装的 APK 会拿到新的 UID，Magisk 里旧的授权记录失效，
+  表现为开关点了没反应、日志里是 `writeConfig => Permission denied`。见 7.6。
+- **卸载不会自动还原 NFC 组件**：正常路径下脚本会自己还原（8.5），但如果卸载前
+  手动清过 `/data/local/tmp`，标记文件丢了就不知道该不该还原，需要手动
+  `pm enable`，命令见 8.5。
 - 换 MIUI / HyperOS 版本后，若 `content call` 报 `IllegalArgumentException` 或无效，
   说明 provider 的 method 或 key 变了，需要重新反编译确认。
 
-## 十、更新日志
+## 十二、更新日志
 
-### v1.8（当前版本，`versionCode 9` / 脚本 v17）
+### v1.9（当前版本，`versionCode 10` / 脚本 v20）
+
+- **新增彩蛋：屏蔽 NFC 刷卡弹窗**（第八章）。刷门禁时 MIUI 会整页弹出
+  `com.miui.tsmclient/.ui.quick.DoubleClickActivity`（「请靠近读卡器」），
+  正在用别的 App 会被顶走、刷完还得手动切回来。现在直接把这个 Activity 禁用：
+  **界面不再弹，卡模拟照常**（卡模拟走 SE，不经过这个界面层）
+- 踩到的坑：对系统 App `pm disable-user --user 0` 会被降级成 `default`（无效，界面照弹），
+  必须用 `pm disable --user 0` 才是 `disabled`（`am start` 报 `Error type 3 ... does not exist`）
+- 只恢复自己关的：靠标记文件 `/data/local/tmp/eps_charge_watch.nfc` 记账，
+  开关关掉 / 卸载时才 `pm enable`，不会覆盖用户自己的设置；主循环每 60 秒复查一次，
+  防 MIUI OTA 把组件状态重置回启用
+- 设置页**最下面第五张卡片**（带「彩蛋」标签），默认勾选；cfg 新增 `nfc_block=1/0`
+- **修「卸载了功能还在」**（第七章）：功能实际跑在 `/data/adb/service.d/eps_charge_watch.sh`，
+  Magisk 每次开机照跑，跟 APK 在不在无关——所以卸了 App 依然会回主屏 + 息屏
+- 判据前后踩了三个坑（7.3~7.5）：① 用 `/data/data/<pkg>` 判断，守护进程继承了 App 的
+  mount namespace，那里 App 目录是 bind mount，**卸载后依然存在**，判据永远为真；
+  ② 改用 `/data/app` + `pm list packages` 兜底，但 `pm list packages <pkg>` 未安装时
+  **输出为空、退出码仍是 0**，被兜底当成「命令异常」又判成装着（真机跑了 144 秒没动）；
+  ③ 检查写在 `reaper &` 子 shell 里，`$$` 和 `IDLE_PID`/`RESET_PID` 全不对，
+  文件删干净了但**三个进程还在跑**，功能照旧
+- 现在的判据：`/data/app/*/<pkg>-*` → `pm path com.android.shell`（pm 就绪探针）→
+  `pm path <pkg>`（未安装时退出码 1 且无输出）；任何一步含糊都保守当作「装着」
+- 结构上**删掉 `reaper` 子进程**，检查改成 `housekeeping()` 由主 shell 调用
+  （充电循环每 30 轮≈60 秒一次；没开充电循环时主进程每 60 秒一次），
+  这样 `exit` 退的是真正的主进程，子进程 pid 也在手里。稳态少一个常驻进程
+- 自毁顺序：先还原系统状态（NFC / 背光 hold 文件）→ `kill_pid_tree` 杀 idle/reset
+  连它们的子进程 → 删状态文件 → 删脚本 → 退出；带 5 秒二次确认，
+  避免卸载/重装间隙误触发。真机实测卸载后 **59 秒**归零（脚本 / 标记 / 进程全无）
+- 脚本 v18 → v20，打开 App 自动覆盖安装，不需要卸载
+
+### v1.8（`versionCode 9` / 脚本 v17）
 
 - **归位不再有亮屏空白**（6.7 / 6.8）：v1.7 用 `CLEAR_TASK` 重建桌面，屏幕确实不亮，
   但亮屏那一下要重新绑一遍工作区——实测 175ms 还是黑屏、约 400ms 只显示壁纸、
@@ -760,7 +1120,7 @@ Gradle 由仓库自带的 Wrapper 8.7 提供，不需要单独安装。
   图标改为喜庆红底 + 金色闪电，全界面铺满红底
 - v1.3：新增「闲置息屏」，用 evdev 阻塞读监控真实触屏
 
-## 十一、参考
+## 十三、参考
 
 最初思路来自社区里的一个 Vector / Xposed 模块（通过注入 `system_server` 监听电量来写设置键）。
 该项目改为**普通 APK + root + 直接调用 PowerSaverProvider**，

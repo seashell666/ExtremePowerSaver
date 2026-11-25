@@ -13,6 +13,7 @@ object Prefs {
     private const val KEY_IDLE_SCREEN_OFF = "idle_screen_off"
     private const val KEY_RESET_HOME = "reset_home_on_screen_off"
     private const val KEY_RESET_SILENT = "reset_home_silent"
+    private const val KEY_NFC_BLOCK = "nfc_block_swipe_page"
 
     /** 闲置多久判定为「没人在用」，单位秒。447 = 7 分 27 秒。改这里就能调整时长。 */
     const val IDLE_TIMEOUT_SEC = 447
@@ -133,7 +134,32 @@ object Prefs {
             .edit().putBoolean(KEY_RESET_SILENT, v).apply()
     }
 
+    /**
+     * 屏蔽 MIUI 的 NFC 刷卡页（彩蛋功能）。
+     *
+     * 刷门禁 / 公交时，小米智能卡会把整页「请靠近读卡器」顶到前台，
+     * 正在用的 App 被挤到后台，还得手动切回来。勾选后由守护脚本
+     * `pm disable` 掉那个 Activity：
+     *
+     *   com.miui.tsmclient/com.miui.tsmclient.ui.quick.DoubleClickActivity
+     *
+     * NFC 卡模拟走的是 SE 服务，不经过这个界面，所以刷卡本身不受影响。
+     * 代价：双击电源键唤起刷卡页用的是同一个 Activity，勾选后也会一起失效。
+     *
+     * 默认 true —— 这个 App 的定位就是「把多余的动作拿掉」；
+     * 想用刷卡页时在设置页取消勾选即可，脚本会把组件重新启用。
+     */
+    fun nfcBlockPopup(ctx: Context): Boolean =
+        ctx.getSharedPreferences(SP, Context.MODE_PRIVATE)
+            .getBoolean(KEY_NFC_BLOCK, true)
+
+    fun setNfcBlockPopup(ctx: Context, v: Boolean) {
+        ctx.getSharedPreferences(SP, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_NFC_BLOCK, v).apply()
+    }
+
     /** 是否有任意一个守护功能处于开启状态（决定脚本要不要装）。 */
     fun anyWatchEnabled(ctx: Context): Boolean =
-        autoExitOnCharge(ctx) || idleScreenOff(ctx) || resetHomeOnScreenOff(ctx)
+        autoExitOnCharge(ctx) || idleScreenOff(ctx) ||
+            resetHomeOnScreenOff(ctx) || nfcBlockPopup(ctx)
 }

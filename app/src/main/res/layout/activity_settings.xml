@@ -379,6 +379,76 @@
                 android:textSize="11sp" />
         </LinearLayout>
 
+        <!-- 卡片五：彩蛋 · NFC 刷卡弹窗 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_card"
+            android:elevation="6dp"
+            android:orientation="vertical"
+            android:padding="18dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="NFC 刷卡弹窗"
+                    android:textColor="@color/text_dark"
+                    android:textSize="17sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_chip"
+                    android:paddingStart="7dp"
+                    android:paddingTop="2dp"
+                    android:paddingEnd="7dp"
+                    android:paddingBottom="2dp"
+                    android:text="彩蛋"
+                    android:textColor="@color/festive_red"
+                    android:textSize="10sp" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:lineSpacingExtra="3dp"
+                android:text="刷门禁、坐公交时，小米智能卡会把整页「请靠近读卡器」顶到前台，正在用的 App 被挤到后台，还得手动切回来。勾选后直接关掉这个界面：卡片照常刷（NFC 卡模拟走的是安全芯片服务，不经过这个界面），只是不再弹窗。"
+                android:textColor="@color/text_body"
+                android:textSize="12sp" />
+
+            <CheckBox
+                android:id="@+id/cbNfcBlock"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:buttonTint="@color/festive_red"
+                android:checked="true"
+                android:text="屏蔽 NFC 刷卡弹窗"
+                android:textColor="@color/text_dark"
+                android:textSize="13sp"
+                app:buttonTint="@color/festive_red" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="22dp"
+                android:layout_marginTop="2dp"
+                android:lineSpacingExtra="2dp"
+                android:text="它和「双击电源键唤起刷卡页」是同一个界面，所以勾选后双击电源键也不会再唤起；想用就回来取消勾选，组件会立刻恢复。"
+                android:textColor="@color/text_hint"
+                android:textSize="11sp" />
+        </LinearLayout>
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

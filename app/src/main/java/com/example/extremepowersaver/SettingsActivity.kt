@@ -27,6 +27,7 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var cbIdle: CheckBox
     private lateinit var cbReset: CheckBox
     private lateinit var cbResetSilent: CheckBox
+    private lateinit var cbNfcBlock: CheckBox
     private lateinit var tvWatchStatus: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,6 +41,7 @@ class SettingsActivity : AppCompatActivity() {
         cbIdle = findViewById(R.id.cbIdle)
         cbReset = findViewById(R.id.cbReset)
         cbResetSilent = findViewById(R.id.cbResetSilent)
+        cbNfcBlock = findViewById(R.id.cbNfcBlock)
         tvWatchStatus = findViewById(R.id.tvWatchStatus)
 
         editCommand.setText(Prefs.command(this))
@@ -50,6 +52,7 @@ class SettingsActivity : AppCompatActivity() {
         cbIdle.isChecked = Prefs.idleScreenOff(this)
         cbReset.isChecked = Prefs.resetHomeOnScreenOff(this)
         cbResetSilent.isChecked = Prefs.resetSilent(this)
+        cbNfcBlock.isChecked = Prefs.nfcBlockPopup(this)
         cbResetSilent.isEnabled = cbReset.isChecked
         cbAutoExit.setOnCheckedChangeListener { _, checked ->
             Prefs.setAutoExitOnCharge(this, checked)
@@ -67,6 +70,10 @@ class SettingsActivity : AppCompatActivity() {
         }
         cbResetSilent.setOnCheckedChangeListener { _, checked ->
             Prefs.setResetSilent(this, checked)
+            applyWatch()
+        }
+        cbNfcBlock.setOnCheckedChangeListener { _, checked ->
+            Prefs.setNfcBlockPopup(this, checked)
             applyWatch()
         }
         refreshWatchStatus()
@@ -106,6 +113,7 @@ class SettingsActivity : AppCompatActivity() {
         cbIdle.isEnabled = false
         cbReset.isEnabled = false
         cbResetSilent.isEnabled = false
+        cbNfcBlock.isEnabled = false
         tvWatchStatus.text = "正在应用设置…"
 
         executor.execute {
@@ -115,6 +123,7 @@ class SettingsActivity : AppCompatActivity() {
                 cbIdle.isEnabled = true
                 cbReset.isEnabled = true
                 cbResetSilent.isEnabled = cbReset.isChecked
+                cbNfcBlock.isEnabled = true
                 if (!ok) Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                 refreshWatchStatus()
             }
